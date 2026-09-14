@@ -117,7 +117,10 @@ export async function POST(request) {
           isValid = modelsRes.ok;
           error = isValid ? null : `OpenCode Zen catalog unavailable (${modelsRes.status})`;
         }
-        break;
+        return NextResponse.json({
+          valid: isValid,
+          error: isValid ? null : error,
+        });
       }
 
       if (isOpenAICompatibleProvider(provider)) {
