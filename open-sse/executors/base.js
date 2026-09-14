@@ -218,6 +218,12 @@ export class BaseExecutor {
       const cachedNoImages = hasNoImageSupport(this.provider, model);
       const sourceBody = cachedNoImages ? stripImagesFromBody(body) : body;
       let transformedBody = this.transformRequest(model, sourceBody, stream, effectiveCredentials);
+      // Gemini selects streaming through the endpoint suffix, not a JSON field.
+      // Strip OpenAI's stream flag at the common serialization boundary so every
+      // Gemini execution path sends a schema-valid Google request.
+      if (this.provider === "gemini" && transformedBody && typeof transformedBody === "object") {
+        delete transformedBody.stream;
+      }
       // 0.5.123 (upstream 13ed1456) — thread model so the claude executor can pick
       // anthropic-beta per model. Only DefaultExecutor reads the extra args; executors
       // with their own execute() (antigravity) or explicit super calls are unaffected.
