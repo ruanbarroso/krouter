@@ -24,7 +24,14 @@ export class DefaultExecutor extends BaseExecutor {
       stripUnsupportedParams(this.provider, model, transformed);
     }
 
-    return injectReasoningContent({ provider: this.provider, model, body: transformed });
+    const finalBody = injectReasoningContent({ provider: this.provider, model, body: transformed });
+    // Gemini selects streaming through the endpoint suffix, not a JSON field.
+    // Strip OpenAI's stream flag after all provider transforms, immediately
+    // before BaseExecutor serializes the request.
+    if (this.provider === "gemini" && finalBody && typeof finalBody === "object") {
+      delete finalBody.stream;
+    }
+    return finalBody;
   }
 
   // Fallback json_schema → json_object for openai-compatible providers without native Structured Output.
