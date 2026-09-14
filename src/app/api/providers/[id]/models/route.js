@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { NextResponse } from "next/server";
 import { getProviderConnectionById } from "@/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
@@ -379,11 +380,14 @@ const PROVIDER_MODELS_CONFIG = {
   assemblyai: createOpenAIModelsConfig("https://api.assemblyai.com/v1/models"),
   "vercel-ai-gateway": createOpenAIModelsConfig("https://ai-gateway.vercel.sh/v1/models"),
 
-  // No-auth passthrough providers
+  // OpenCode Zen catalog is public, but the connection credential is still
+  // sent so paid-key connections use the same endpoint and proxy as inference.
   opencode: {
     url: "https://opencode.ai/zen/v1/models",
     method: "GET",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-opencode-client": "barroso-keys" },
+    authHeader: "Authorization",
+    authPrefix: "Bearer ",
     parseResponse: parseOpenAIStyleModels
   },
   "mimo-free": {
@@ -666,6 +670,12 @@ export async function GET(request, { params }) {
     // SELF_SIGNED_CERT_IN_CHAIN error. MITM checks this header first and
     // passthroughs to the real upstream.
     const headers = { ...config.headers, "x-request-source": "local" };
+    if (effectiveProvider === "opencode") {
+      headers["x-opencode-session"] = `ses_${crypto.randomUUID().replaceAll("-", "")}`;
+      headers["x-opencode-request"] = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
+      headers["x-opencode-project"] = "global";
+      headers["user-agent"] = "barroso-keys/1.0";
+    }
     if (config.authHeader && !config.authQuery && token) {
       headers[config.authHeader] = (config.authPrefix || "") + token;
     }
@@ -698,7 +708,12 @@ export async function GET(request, { params }) {
     }
 
     const data = await response.json();
-    const models = normalizeModels(config.parseResponse(data));
+    let models = normalizeModels(config.parseResponse(data));
+    // The shared `public` credential only has access to free Zen models.
+    // Paid keys retain the complete catalog exposed by the account.
+    if (effectiveProvider === "opencode" && token === "public") {
+      models = models.filter((model) => /-free$/.test(model.id) || model.id === "big-pickle");
+    }
 
     return NextResponse.json({
       provider: effectiveProvider,

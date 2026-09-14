@@ -107,11 +107,15 @@ export class OpenCodeExecutor extends BaseExecutor {
   }
 
   buildHeaders(credentials, stream = true) {
+    const key = credentials?.apiKey || credentials?.accessToken || "public";
     const headers = {
       "Content-Type": "application/json",
-      "Authorization": "Bearer public",
-      "x-opencode-client": "desktop",
+      "Authorization": `Bearer ${key}`,
+      "x-opencode-client": "barroso-keys",
       "x-request-source": "local",
+      "x-opencode-request": `msg_${crypto.randomUUID().replaceAll("-", "")}`,
+      "x-opencode-project": "global",
+      "user-agent": "barroso-keys/1.0",
     };
     if (stream) headers["Accept"] = "text/event-stream";
     headers[OPENCODE_SESSION_HEADER] = credentials?.[SESSION_FIELD]

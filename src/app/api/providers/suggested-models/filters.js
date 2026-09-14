@@ -35,7 +35,7 @@ export const FILTERS = {
   // endpoint returns; if a model is on this endpoint at all, it's free.
   "opencode-free": (models) =>
     (Array.isArray(models) ? models : [])
-      .filter((m) => !DEAD_FREE_OPENCODE_MODELS.has(m.id))
+      .filter((m) => (/-free$/.test(m?.id || "") || m?.id === "big-pickle") && !DEAD_FREE_OPENCODE_MODELS.has(m.id))
       .map((m) => ({
         id: m.id,
         name: m.name || m.id,

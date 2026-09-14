@@ -501,11 +501,12 @@ export const PROVIDERS = {
     tokenUrl: "https://copilot.tencent.com/v2/plugin/auth/token",
     refreshUrl: "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
   },
+  // OpenCode Zen is keyed; `public` is an explicit free-tier credential.
+  // Keep this separate from OpenCode Go below: the products and endpoints differ.
   opencode: {
     baseUrl: "https://opencode.ai",
     format: "openai",
-    headers: { "x-opencode-client": "desktop" },
-    noAuth: true
+    headers: { "x-opencode-client": "barroso-keys" }
   },
   "opencode-go": {
     baseUrl: "https://opencode.ai/zen/go/v1/chat/completions",

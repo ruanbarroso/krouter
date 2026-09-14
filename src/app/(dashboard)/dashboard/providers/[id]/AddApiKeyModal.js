@@ -18,7 +18,8 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const isOllamaLocal = provider === "ollama-local";
   const isCookie = authType === "cookie";
   const isXaiApiKey = provider === "xai" && !isCookie;
-  const credentialLabel = isCookie ? "Cookie Value" : "API Key";
+  const isOpenCodeZen = provider === "opencode";
+  const credentialLabel = isCookie ? "Cookie Value" : (isOpenCodeZen ? "OpenCode Zen Key" : "API Key");
   const credentialPlaceholder = isCookie
     ? (provider === "grok-web" ? "sso=xxxxx... or just the raw value" : "eyJhbGciOi...")
     : (isXaiApiKey ? "xai-..." : "");
@@ -44,6 +45,8 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   });
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
   const [region, setRegion] = useState(defaultRegion);
+  const [credentialMode, setCredentialMode] = useState(isOpenCodeZen ? "public" : "key");
+  const effectiveApiKey = isOpenCodeZen && credentialMode === "public" ? "public" : formData.apiKey;
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -117,7 +120,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
       const res = await fetch("/api/providers/validate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, apiKey: formData.apiKey, providerSpecificData: buildProviderSpecificData() }),
+        body: JSON.stringify({ provider, apiKey: effectiveApiKey, providerSpecificData: buildProviderSpecificData() }),
       });
       const data = await res.json();
       setValidationResult(data.valid ? "success" : "failed");
@@ -130,7 +133,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
 
   const handleSubmit = async () => {
     if (!provider) return;
-    if (!isOllamaLocal && !formData.apiKey) return;
+    if (!isOllamaLocal && !effectiveApiKey) return;
     if (!isOllamaLocal) {
       // Non-ollama providers require a name
       if (!formData.name) return;
@@ -146,7 +149,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         const res = await fetch("/api/providers/validate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider, apiKey: formData.apiKey, providerSpecificData: buildProviderSpecificData() }),
+          body: JSON.stringify({ provider, apiKey: effectiveApiKey, providerSpecificData: buildProviderSpecificData() }),
         });
         const data = await res.json();
         isValid = !!data.valid;
@@ -159,7 +162,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
 
       await onSave({
         name: formData.name || (isOllamaLocal ? "Ollama Local" : ""),
-        apiKey: formData.apiKey,
+        apiKey: effectiveApiKey,
         defaultModel: isCompatible ? formData.defaultModel.trim() : undefined,
         priority: formData.priority,
         proxyPoolId: formData.proxyPoolId === NONE_PROXY_POOL_VALUE ? null : formData.proxyPoolId,
@@ -242,6 +245,14 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         )}
 
         {mode === "single" && (<>
+        {isOpenCodeZen && (
+          <Select
+            label="Credential type"
+            value={credentialMode}
+            onChange={(e) => setCredentialMode(e.target.value)}
+            options={[{ value: "public", label: "Public free-tier key" }, { value: "key", label: "Paid API key" }]}
+          />
+        )}
         <Input
           label="Name"
           value={formData.name}
@@ -269,13 +280,14 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             <Input
               label={credentialLabel}
               type={isCookie ? "text" : "password"}
-              value={formData.apiKey}
+              value={isOpenCodeZen && credentialMode === "public" ? "public" : formData.apiKey}
               onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
-              placeholder={credentialPlaceholder}
+              placeholder={isOpenCodeZen ? "public or paid key" : credentialPlaceholder}
+              disabled={isOpenCodeZen && credentialMode === "public"}
               className="flex-1"
             />
             <div className="pt-6">
-              <Button onClick={handleValidate} disabled={!formData.apiKey || validating || saving} variant="secondary">
+              <Button onClick={handleValidate} disabled={!effectiveApiKey || validating || saving} variant="secondary">
                 {validating ? "Checking..." : "Check"}
               </Button>
             </div>
@@ -438,7 +450,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         </p>
 
         <div className="flex gap-2">
-          <Button onClick={handleSubmit} fullWidth disabled={saving || (!isOllamaLocal && (!formData.name || !formData.apiKey)) || (isCompatible && !formData.defaultModel.trim()) || (isAzure && (!azureData.azureEndpoint || !azureData.deployment || !azureData.organization)) || (isCloudflareAi && !cloudflareData.accountId)}>
+          <Button onClick={handleSubmit} fullWidth disabled={saving || (!isOllamaLocal && (!formData.name || !effectiveApiKey)) || (isCompatible && !formData.defaultModel.trim()) || (isAzure && (!azureData.azureEndpoint || !azureData.deployment || !azureData.organization)) || (isCloudflareAi && !cloudflareData.accountId)}>
             {saving ? "Saving..." : "Save"}
           </Button>
           <Button onClick={onClose} variant="ghost" fullWidth>

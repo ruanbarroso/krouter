@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { NextResponse } from "next/server";
 import { getProviderNodeById } from "@/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider, AI_PROVIDERS } from "@/shared/constants/providers";
@@ -99,6 +100,26 @@ export async function POST(request) {
 
     // Validate with each provider
     try {
+      if (provider === "opencode") {
+        // Zen's public key is a real, explicit credential. The free tier is
+        // unstable, so retry a few catalog models and treat 401/403 as the
+        // only definitive credential failure.
+        const key = apiKey || "public";
+        const session = `ses_${crypto.randomUUID().replaceAll("-", "")}`;
+        const modelsRes = await fetch("https://opencode.ai/zen/v1/models", {
+          headers: { Authorization: `Bearer ${key}`, "x-opencode-client": "barroso-keys", "x-opencode-session": session },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (modelsRes.status === 401 || modelsRes.status === 403) {
+          isValid = false;
+          error = "Invalid OpenCode Zen API key";
+        } else {
+          isValid = modelsRes.ok;
+          error = isValid ? null : `OpenCode Zen catalog unavailable (${modelsRes.status})`;
+        }
+        break;
+      }
+
       if (isOpenAICompatibleProvider(provider)) {
         const node = await getProviderNodeById(provider);
         if (!node) {

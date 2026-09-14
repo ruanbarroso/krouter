@@ -640,6 +640,24 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         const valid = !!(data && data.user);
         return { valid, error: valid ? null : "Session expired — re-paste cookie" };
       }
+      case "opencode": {
+        const key = connection.apiKey || "public";
+        const session = `ses_${crypto.randomUUID().replaceAll("-", "")}`;
+        const res = await fetchWithConnectionProxy("https://opencode.ai/zen/v1/models", {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${key}`,
+            "x-opencode-client": "barroso-keys",
+            "x-opencode-session": session,
+            "x-opencode-request": `msg_${crypto.randomUUID().replaceAll("-", "")}`,
+            "x-opencode-project": "global",
+            "user-agent": "barroso-keys/1.0",
+          },
+        }, effectiveProxy);
+        const valid = res.status !== 401 && res.status !== 403;
+        return { valid, error: valid ? null : "Invalid OpenCode Zen API key" };
+      }
       case "opencode-go": {
         const res = await fetchWithConnectionProxy("https://opencode.ai/zen/go/v1/chat/completions", {
           method: "POST",
