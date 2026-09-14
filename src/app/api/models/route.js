@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getModelAliases, setModelAlias } from "@/models";
-import { getDisabledModels } from "@/lib/disabledModelsDb";
+import { getDisabledModels, enableModels } from "@/lib/disabledModelsDb";
 import { AI_MODELS } from "@/shared/constants/config";
 import { getProviderAlias } from "@/shared/constants/providers";
 
@@ -55,6 +55,20 @@ export async function PUT(request) {
 
     // Update alias
     await setModelAlias(model, alias);
+
+    try {
+      const slash = String(model).indexOf("/");
+      if (slash > 0) {
+        const providerAlias = String(model).slice(0, slash);
+        const modelId = String(model).slice(slash + 1);
+        if (providerAlias && modelId) await enableModels(providerAlias, [modelId]);
+      }
+    } catch { /* enable is best-effort; alias already saved */ }
+
+    try {
+      const { invalidateModelsCache } = await import("@/app/api/v1/models/route.js");
+      invalidateModelsCache?.();
+    } catch { /* cache TTL covers it */ }
 
     return NextResponse.json({ success: true, model, alias });
   } catch (error) {

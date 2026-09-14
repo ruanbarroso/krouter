@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getModelAliases, setModelAlias, deleteModelAlias } from "@/models";
+import { enableModels } from "@/lib/disabledModelsDb";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +27,25 @@ export async function PUT(request) {
 
     await setModelAlias(alias, model);
 
+    // Adding a model is an explicit enable: a hardcoded model that was
+    // previously disabled via the X button stays in disabledModels and would
+    // otherwise remain invisible (filtered from displayModels and excluded
+    // from the custom list as "already hardcoded"). Clear it so the + button
+    // actually restores the model.
+    try {
+      const slash = String(model).indexOf("/");
+      if (slash > 0) {
+        const providerAlias = String(model).slice(0, slash);
+        const modelId = String(model).slice(slash + 1);
+        if (providerAlias && modelId) await enableModels(providerAlias, [modelId]);
+      }
+    } catch { /* enable is best-effort; alias already saved */ }
+
+    try {
+      const { invalidateModelsCache } = await import("@/app/api/v1/models/route.js");
+      invalidateModelsCache?.();
+    } catch { /* cache TTL covers it */ }
+
     return NextResponse.json({ success: true, model, alias });
   } catch (error) {
     console.log("Error updating alias:", error);
@@ -44,6 +64,11 @@ export async function DELETE(request) {
     }
 
     await deleteModelAlias(alias);
+
+    try {
+      const { invalidateModelsCache } = await import("@/app/api/v1/models/route.js");
+      invalidateModelsCache?.();
+    } catch { /* cache TTL covers it */ }
 
     return NextResponse.json({ success: true });
   } catch (error) {

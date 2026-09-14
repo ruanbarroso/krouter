@@ -491,7 +491,7 @@ export default function ProviderDetailPage() {
         body: JSON.stringify({ model: fullModel, alias }),
       });
       if (res.ok) {
-        await fetchAliases();
+        await Promise.all([fetchAliases(), fetchDisabledModels()]);
       } else {
         const data = await res.json();
         alert(data.error || "Failed to set alias");
