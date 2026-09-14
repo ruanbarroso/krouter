@@ -169,7 +169,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     toolNameMap = translatedBody._toolNameMap;
     delete translatedBody._toolNameMap;
     translatedBody.model = upstreamModel;
-    if (translatedBody.stream === undefined) translatedBody.stream = stream;
+    // Gemini selects streaming through the endpoint suffix, not a JSON field.
+    // Sending OpenAI's `stream` field makes Google's schema reject the request.
+    if (provider === "gemini") {
+      delete translatedBody.stream;
+    } else if (translatedBody.stream === undefined) {
+      translatedBody.stream = stream;
+    }
   }
 
   // Dedupe duplicate built-in tools when equivalent MCP tools are present (Claude clients only).
