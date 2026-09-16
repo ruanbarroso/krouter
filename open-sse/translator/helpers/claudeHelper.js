@@ -1,5 +1,4 @@
 // Claude helper functions for translator
-import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../../config/defaultThinkingSignature.js";
 import { adjustMaxTokens } from "./maxTokensHelper.js";
 import { applyCloaking } from "../../utils/claudeCloaking.js";
 import { deriveSessionId } from "../../utils/sessionManager.js";
@@ -267,6 +266,8 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     // Pass 2 (reverse): add cache_control to last assistant + handle thinking for Anthropic.
     //    The cache_control mutation here is also gated by preserveCacheControl.
     let lastAssistantProcessed = false;
+    let sawSignedThinking = false;
+    let sawOrphanedToolUse = false;
     for (let i = filtered.length - 1; i >= 0; i--) {
       const msg = filtered[i];
 
@@ -284,40 +285,58 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
           lastAssistantProcessed = true;
         }
 
-        // Handle thinking blocks for Anthropic endpoint only
+        // Handle thinking blocks for Anthropic endpoint only.
+        //
+        // Anthropic validates every thinking signature byte-for-byte, so the
+        // only signatures it accepts are the ones it minted. Stamping history
+        // with DEFAULT_THINKING_CLAUDE_SIGNATURE made every multi-turn request
+        // 400 with "Invalid `signature` in `thinking` block" (production
+        // 2026-09-16: 116/116 claude-provider errors, combo saved only by the
+        // kiro fallback, which does not validate signatures).
         if (provider === "claude" || provider?.startsWith("anthropic-compatible")) {
           let hasToolUse = false;
           let hasThinking = false;
 
-          // Only fill in the fallback signature when the block carries none.
-          // An Anthropic-issued signature is only valid byte-for-byte: replay it
-          // verbatim. Stamping every block with DEFAULT_THINKING_CLAUDE_SIGNATURE
-          // made every multi-turn request to a real Claude endpoint 400 with
-          // "Invalid `signature` in `thinking` block" (production 2026-09-16:
-          // 116/116 claude-provider errors, combo saved only by kiro fallback).
-          // Blocks minted by a provider that issues no signature keep the
-          // previous fallback behavior — forging is their only chance, however
-          // slim, since Anthropic rejects unsigned thinking blocks outright.
+          const kept = [];
           for (const block of msg.content) {
-            if (block.type === "thinking" || block.type === "redacted_thinking") {
-              if (typeof block.signature !== "string" || block.signature.length === 0) {
-                block.signature = DEFAULT_THINKING_CLAUDE_SIGNATURE;
+            if (block.type === "thinking") {
+              // Signed: replay verbatim. Unsigned (history translated in from
+              // a provider that mints none, e.g. kiro reasoning): drop — a
+              // forged signature can never validate, while a dropped block
+              // lets the call through whenever thinking isn't structurally
+              // required below.
+              if (typeof block.signature === "string" && block.signature.length > 0) {
+                kept.push(block);
+                hasThinking = true;
+                sawSignedThinking = true;
               }
+              continue;
+            }
+            if (block.type === "redacted_thinking") {
+              // Canonical shape is {type, data}: Anthropic never issues
+              // signatures on redacted blocks, so strip any stamped one.
+              delete block.signature;
+              kept.push(block);
               hasThinking = true;
+              continue;
             }
             if (block.type === "tool_use") hasToolUse = true;
+            kept.push(block);
           }
-
-          // Add thinking block if thinking enabled + has tool_use but no thinking
-          if (thinkingEnabled && !hasThinking && hasToolUse) {
-            msg.content.unshift({
-              type: "thinking",
-              thinking: ".",
-              signature: DEFAULT_THINKING_CLAUDE_SIGNATURE
-            });
-          }
+          if (kept.length !== msg.content.length) msg.content = kept;
+          if (hasToolUse && !hasThinking) sawOrphanedToolUse = true;
         }
       }
+    }
+
+    // Thinking enabled but some tool_use turn lost all thinking above: Anthropic
+    // would demand a thinking block there, and the old code injected a fake
+    // {thinking: ".", signature: <constant>} that 400'd every time. Downgrade
+    // to a non-thinking call instead — but ONLY when no signed thinking
+    // survives anywhere, so histories with valid chains keep thinking enabled
+    // exactly as the client asked.
+    if (thinkingEnabled && sawOrphanedToolUse && !sawSignedThinking) {
+      delete body.thinking;
     }
   }
 

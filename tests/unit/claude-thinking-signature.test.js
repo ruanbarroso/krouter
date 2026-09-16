@@ -1,26 +1,33 @@
-// Thinking-block signatures on the Claude path must round-trip verbatim.
+// Thinking-block handling on the Claude path.
 //
 // Production 2026-09-16: every multi-turn request routed to the `claude`
 // provider 400'd with "Invalid `signature` in `thinking` block" (116/116
 // claude errors in requestDetails, combo saved only by the kiro fallback).
 // Root cause: prepareClaudeRequest stamped EVERY thinking/redacted_thinking
-// block with DEFAULT_THINKING_CLAUDE_SIGNATURE, clobbering the
-// Anthropic-issued signature the client replayed from history. An Anthropic
-// signature is only valid byte-for-byte, so the constant never validates.
+// block with DEFAULT_THINKING_CLAUDE_SIGNATURE, clobbering Anthropic-issued
+// signatures — and history translated in from providers that mint no
+// signature (e.g. kiro reasoning) can never validate either.
 //
-// Rule pinned here: preserve a present signature, fill the fallback constant
-// only when the block carries none.
+// Rules pinned here:
+//   1. A present signature replays verbatim (valid byte-for-byte only).
+//   2. Unsigned thinking blocks are DROPPED (forging can never validate).
+//   3. redacted_thinking keeps canonical shape {type, data} — Anthropic never
+//      issues signatures on redacted blocks, so any stamped one is stripped.
+//   4. Thinking enabled + tool_use left without thinking after the drop, and
+//      no signed thinking survives anywhere: downgrade to a non-thinking call
+//      instead of injecting the fake {thinking: ".", ...} block (which 400'd
+//      every time). Histories with valid chains keep thinking enabled.
 import { describe, expect, it } from "vitest";
 import "../translator/registerAll.js";
 import { translateRequest } from "../../open-sse/translator/index.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
 import { prepareClaudeRequest } from "../../open-sse/translator/helpers/claudeHelper.js";
-import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../../open-sse/config/defaultThinkingSignature.js";
 
 const REAL_SIGNATURE = "EpwGCkYIBBj72sRealAnthropicSignatureFromHistory0001";
 
-const multiTurnBody = (thinkingBlock) => ({
+const multiTurnBody = (thinkingBlock, extra = {}) => ({
   model: "claude-opus-5",
+  ...extra,
   messages: [
     { role: "user", content: "list the files" },
     {
@@ -37,10 +44,10 @@ const multiTurnBody = (thinkingBlock) => ({
   ],
 });
 
-const thinkingOf = (out, index = 0) =>
+const thinkingBlocksOf = (out) =>
   out.messages
     .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
-    .filter((b) => b.type === "thinking" || b.type === "redacted_thinking")[index];
+    .filter((b) => b.type === "thinking" || b.type === "redacted_thinking");
 
 describe("prepareClaudeRequest thinking signatures (provider claude)", () => {
   it("preserves an Anthropic-issued thinking signature verbatim", () => {
@@ -48,7 +55,8 @@ describe("prepareClaudeRequest thinking signatures (provider claude)", () => {
       multiTurnBody({ type: "thinking", thinking: "plan", signature: REAL_SIGNATURE }),
       "claude"
     );
-    expect(thinkingOf(out)?.signature).toBe(REAL_SIGNATURE);
+    expect(thinkingBlocksOf(out)).toHaveLength(1);
+    expect(thinkingBlocksOf(out)[0].signature).toBe(REAL_SIGNATURE);
   });
 
   it("preserves signatures on anthropic-compatible targets too", () => {
@@ -56,48 +64,51 @@ describe("prepareClaudeRequest thinking signatures (provider claude)", () => {
       multiTurnBody({ type: "thinking", thinking: "plan", signature: REAL_SIGNATURE }),
       "anthropic-compatible-custom"
     );
-    expect(thinkingOf(out)?.signature).toBe(REAL_SIGNATURE);
+    expect(thinkingBlocksOf(out)[0]?.signature).toBe(REAL_SIGNATURE);
   });
 
-  it("preserves redacted_thinking signatures", () => {
+  it("drops unsigned thinking blocks instead of forging a signature", () => {
+    for (const block of [
+      { type: "thinking", thinking: "plan" },
+      { type: "thinking", thinking: "plan", signature: "" },
+    ]) {
+      const out = prepareClaudeRequest(multiTurnBody(block), "claude");
+      expect(thinkingBlocksOf(out)).toHaveLength(0);
+      // tool_use survives the drop so the turn still executes
+      const assistant = out.messages.find((m) => m.role === "assistant");
+      expect(assistant.content.some((b) => b.type === "tool_use")).toBe(true);
+    }
+  });
+
+  it("strips stamped signatures off redacted_thinking blocks", () => {
     const out = prepareClaudeRequest(
       multiTurnBody({ type: "redacted_thinking", data: "ENCRYPTED", signature: REAL_SIGNATURE }),
       "claude"
     );
-    const block = thinkingOf(out);
-    expect(block?.signature).toBe(REAL_SIGNATURE);
-    expect(block?.data).toBe("ENCRYPTED");
+    const blocks = thinkingBlocksOf(out);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].signature).toBeUndefined();
+    expect(blocks[0].data).toBe("ENCRYPTED");
   });
 
-  it("fills the fallback constant only when the block has no signature", () => {
-    const missing = prepareClaudeRequest(
-      multiTurnBody({ type: "thinking", thinking: "plan" }),
+  it("downgrades to a non-thinking call when tool_use is orphaned and nothing signed survives", () => {
+    const out = prepareClaudeRequest(
+      multiTurnBody(
+        { type: "thinking", thinking: "kiro reasoning, no signature" },
+        { thinking: { type: "enabled", budget_tokens: 1000 }, max_tokens: 2000 }
+      ),
       "claude"
     );
-    expect(thinkingOf(missing)?.signature).toBe(DEFAULT_THINKING_CLAUDE_SIGNATURE);
-
-    const empty = prepareClaudeRequest(
-      multiTurnBody({ type: "thinking", thinking: "plan", signature: "" }),
-      "claude"
-    );
-    expect(thinkingOf(empty)?.signature).toBe(DEFAULT_THINKING_CLAUDE_SIGNATURE);
+    expect(thinkingBlocksOf(out)).toHaveLength(0);
+    expect(out.thinking).toBeUndefined();
   });
 
-  it("leaves thinking blocks untouched for non-Claude providers", () => {
-    const block = { type: "thinking", thinking: "plan", signature: REAL_SIGNATURE };
-    const out = prepareClaudeRequest(multiTurnBody(block), "kiro");
-    expect(thinkingOf(out)?.signature).toBe(REAL_SIGNATURE);
-
-    const unsigned = prepareClaudeRequest(
-      multiTurnBody({ type: "thinking", thinking: "plan" }),
-      "kiro"
-    );
-    expect(thinkingOf(unsigned)?.signature).toBeUndefined();
-  });
-
-  it("preserves signatures across several assistant turns", () => {    const out = prepareClaudeRequest(
+  it("keeps thinking enabled when a valid chain survives elsewhere", () => {
+    const out = prepareClaudeRequest(
       {
         model: "claude-opus-5",
+        thinking: { type: "enabled", budget_tokens: 1000 },
+        max_tokens: 2000,
         messages: [
           { role: "user", content: "a" },
           {
@@ -111,7 +122,9 @@ describe("prepareClaudeRequest thinking signatures (provider claude)", () => {
           {
             role: "assistant",
             content: [
-              { type: "thinking", thinking: "t2", signature: "sig-turn-2" },
+              // unsigned: dropped, orphaning tu_9 — but sig-turn-1 survives,
+              // so the client asked for thinking and keeps it.
+              { type: "thinking", thinking: "foreign reasoning" },
               { type: "tool_use", id: "tu_9", name: "read", input: {} },
             ],
           },
@@ -123,10 +136,45 @@ describe("prepareClaudeRequest thinking signatures (provider claude)", () => {
       },
       "claude"
     );
-    const blocks = out.messages
-      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
-      .filter((b) => b.type === "thinking");
-    expect(blocks.map((b) => b.signature).sort()).toEqual(["sig-turn-1", "sig-turn-2"]);
+    const sigs = thinkingBlocksOf(out).map((b) => b.signature);
+    expect(sigs).toEqual(["sig-turn-1"]);
+    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 1000 });
+  });
+
+  it("never injects a fake thinking block", () => {
+    const out = prepareClaudeRequest(
+      {
+        model: "claude-opus-5",
+        thinking: { type: "enabled", budget_tokens: 1000 },
+        max_tokens: 2000,
+        messages: [
+          { role: "user", content: "run it" },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "tu_2", name: "bash", input: {} }],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "tu_2", content: "done" }],
+          },
+        ],
+      },
+      "claude"
+    );
+    expect(JSON.stringify(out)).not.toContain('"thinking":"."');
+  });
+
+  it("leaves thinking blocks untouched for non-Claude providers", () => {
+    const block = { type: "thinking", thinking: "plan", signature: REAL_SIGNATURE };
+    const out = prepareClaudeRequest(multiTurnBody(block), "kiro");
+    expect(thinkingBlocksOf(out)[0]?.signature).toBe(REAL_SIGNATURE);
+
+    const unsigned = prepareClaudeRequest(
+      multiTurnBody({ type: "thinking", thinking: "plan" }),
+      "kiro"
+    );
+    expect(thinkingBlocksOf(unsigned)).toHaveLength(1);
+    expect(thinkingBlocksOf(unsigned)[0].signature).toBeUndefined();
   });
 
   it("survives the full translateRequest CLAUDE→CLAUDE pipeline to provider claude", () => {
@@ -141,6 +189,6 @@ describe("prepareClaudeRequest thinking signatures (provider claude)", () => {
       null,
       "claude"
     );
-    expect(thinkingOf(out)?.signature).toBe(REAL_SIGNATURE);
+    expect(thinkingBlocksOf(out)[0]?.signature).toBe(REAL_SIGNATURE);
   });
 });
