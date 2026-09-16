@@ -98,7 +98,14 @@ export async function getComboModels(modelStr) {
 
   const combo = await getComboByName(modelStr);
   if (combo && combo.models && combo.models.length > 0) {
-    return combo.models;
+    // Entries can be plain "provider/model" strings or {model, reasoning}
+    // objects (per-entry reasoning effort, PR #5 unmerged). The execution
+    // path below is string-only: an object reaches parseModel().includes and
+    // every request 500s (production 2026-09-16: barroso-chat). Normalize to
+    // ids here; effort application waits for PR #5.
+    return combo.models
+      .map((e) => (e && typeof e === "object" ? e.model : e))
+      .filter(Boolean);
   }
   return null;
 }

@@ -17,7 +17,12 @@ export function getComboModelsFromData(modelStr, combosData) {
   
   const combo = combos.find(c => c.name === modelStr);
   if (combo && combo.models && combo.models.length > 0) {
-    return combo.models;
+    // Same object-entry normalization as src/sse/services/model.js: entries
+    // can be {model, reasoning} (PR #5 unmerged); the execution path is
+    // string-only.
+    return combo.models
+      .map((e) => (e && typeof e === "object" ? e.model : e))
+      .filter(Boolean);
   }
   return null;
 }
