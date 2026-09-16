@@ -320,7 +320,11 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
 
   // Pass through other relevant fields
   if (body.temperature !== undefined) result.temperature = body.temperature;
-  if (body.max_tokens !== undefined) result.max_tokens = body.max_tokens;
+  // Responses API uses max_output_tokens, not max_tokens / max_completion_tokens.
+  // Zen Console validates strictly: unknown parameter `max_tokens` 400s.
+  if (body.max_output_tokens !== undefined) result.max_output_tokens = body.max_output_tokens;
+  else if (body.max_completion_tokens !== undefined) result.max_output_tokens = body.max_completion_tokens;
+  else if (body.max_tokens !== undefined) result.max_output_tokens = body.max_tokens;
   if (body.top_p !== undefined) result.top_p = body.top_p;
   // 0.5.121 (upstream c97963c4) — forward service_tier (priority/default/flex)
   // instead of silently dropping it on the OpenAI→Responses conversion.

@@ -33,11 +33,14 @@ describe("getProviderCapabilities", () => {
     expect(or.features.customModels).toBe(false);
   });
 
-  it("classifies a free noAuth provider (opencode)", () => {
+  it("classifies keyed opencode Zen (public free-tier or paid key, not noAuth)", () => {
+    // Zen multi-account: opencode moved FREE_PROVIDERS → APIKEY_PROVIDERS.
+    // Tier is key-dependent at runtime (`public` = free tier); the id-level
+    // manifest honestly reports the keyed taxonomy.
     const oc = getProviderCapabilities("opencode");
-    expect(oc.tier).toBe("free");
-    expect(oc.authModes[0]).toBe("free");
-    expect(oc.noAuth).toBe(true);
+    expect(oc.tier).toBe("paid");
+    expect(oc.authModes[0]).toBe("apikey");
+    expect(oc.noAuth).toBe(false);
   });
 
   it("surfaces regions when provider has them (xiaomi-tokenplan)", () => {

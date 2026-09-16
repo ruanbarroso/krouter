@@ -14,7 +14,6 @@ export const FREE_PROVIDERS = {
   "codebuddy-cn": { id: "codebuddy-cn", alias: "cbcn", name: "CodeBuddy CN", icon: "smart_toy", color: "#006EFF", textIcon: "CB", website: "https://copilot.tencent.com", notice: { signupUrl: "https://copilot.tencent.com" }, authModes: ["oauth"], hasOAuth: true },
   qoder: { id: "qoder", alias: "qd", name: "Qoder", icon: "water_drop", color: "#EC4899", deprecated: true, deprecationNotice: RISK_NOTICE, website: "https://qoder.com", notice: { signupUrl: "https://qoder.com" } },
   // iflow: { id: "iflow", alias: "if", name: "iFlow AI", icon: "water_drop", color: "#6366F1", website: "https://iflow.cn", notice: { signupUrl: "https://iflow.cn" } },
-  opencode: { id: "opencode", alias: "oc", name: "OpenCode Free", icon: "terminal", color: "#E87040", textIcon: "OC", noAuth: true, passthroughModels: true, modelsFetcher: { url: "https://opencode.ai/zen/v1/models", type: "opencode-free" } },
   "mimo-free": { id: "mimo-free", alias: "mmf", name: "MiMo Code Free", icon: "smart_toy", color: "#FF6900", textIcon: "MF", noAuth: true, passthroughModels: true, modelsFetcher: { url: "https://models.dev/api.json", type: "mimo-free" } },
 };
 
@@ -83,10 +82,11 @@ export const OAUTH_PROVIDERS = {
   // 0.5.109 (upstream b08751c4) — ClinePass: Cline's subscription pass. Same
   // auth backend as `cline`, but its own `cline-pass/*` model namespace.
   clinepass: { id: "clinepass", alias: "clinepass", name: "ClinePass", icon: "vpn_key", color: "#5B9BD5", textIcon: "CP", website: "https://cline.bot", notice: { signupUrl: "https://app.cline.bot" }, authModes: ["oauth", "apikey"], hasOAuth: true },
-  // opencode: { id: "opencode", alias: "oc", name: "OpenCode", icon: "terminal", color: "#E87040", textIcon: "OC" },
 };
 
 export const APIKEY_PROVIDERS = {
+  // OpenCode Zen accepts either the documented public free-tier key or a paid key.
+  opencode: { id: "opencode", alias: "oc", name: "OpenCode Zen", icon: "terminal", color: "#E87040", textIcon: "OC", passthroughModels: true, modelsFetcher: { url: "https://opencode.ai/zen/v1/models", type: "opencode-free" }, website: "https://opencode.ai", notice: { text: "Use `public` for the free tier or an OpenCode API key for paid models.", apiKeyUrl: "https://opencode.ai/auth" } },
   glm: { id: "glm", alias: "glm", name: "GLM Coding (Z.ai)", icon: "code", color: "#2563EB", textIcon: "GL", website: "https://z.ai", notice: { apiKeyUrl: "https://z.ai/usercenter/apikeys" } },
   "glm-cn": { id: "glm-cn", alias: "glm-cn", name: "GLM (China)", icon: "code", color: "#DC2626", textIcon: "GC", website: "https://open.bigmodel.cn", notice: { apiKeyUrl: "https://open.bigmodel.cn/usercenter/apikeys" } },
   kimi: { id: "kimi", alias: "kimi", name: "Kimi", icon: "psychology", color: "#1E3A8A", textIcon: "KM", website: "https://kimi.moonshot.cn", notice: { apiKeyUrl: "https://platform.moonshot.ai/console/api-keys" }, serviceKinds: ["llm", "webSearch"], searchViaChat: { defaultModel: "kimi-k2.5", pricingUrl: "https://platform.moonshot.ai/docs/pricing/chat" } },
