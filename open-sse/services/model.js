@@ -181,9 +181,18 @@ export function resolveProviderAlias(aliasOrId) {
 }
 
 /**
- * Parse model string: "alias/model" or "provider/model" or just alias
+ * Parse model string: "alias/model" or "provider/model" or just alias.
+ * Combo entries may also arrive as {model, reasoning} objects (per-entry
+ * reasoning effort, PR #5 unmerged): unwrap to the model id first. Without
+ * this, any object entry reaches `modelStr.includes` below and every request
+ * to the combo 500s with `a.includes is not a function` (production
+ * 2026-09-16: barroso-chat + 3 combos). Reasoning application itself waits
+ * for PR #5 — until then the effort field is inert data.
  */
 export function parseModel(modelStr) {
+  if (modelStr && typeof modelStr === "object") {
+    return parseModel(modelStr.model);
+  }
   if (!modelStr) {
     return { provider: null, model: null, isAlias: false, providerAlias: null };
   }
