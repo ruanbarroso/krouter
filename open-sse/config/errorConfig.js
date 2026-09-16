@@ -127,6 +127,17 @@ export const ERROR_RULES = [
   { text: "payload too large",                shouldFallback: false, cooldownMs: 0 },
   { text: "tokens exceeds",                   shouldFallback: false, cooldownMs: 0 },
   { text: "too many tokens",                  shouldFallback: false, cooldownMs: 0 },
+  // 0.5.160 — Invalid thinking signature. The REQUEST carries a thinking
+  // block whose signature Anthropic rejects (stale after client-side
+  // compaction, or minted by another provider). Deterministic per request,
+  // so unlike the input-size rules above the combo SHOULD fall through to
+  // the next model (e.g. kiro, which doesn't validate signatures) — but the
+  // account must NOT cool down: a 400 here says nothing about account health,
+  // and locking the single claude account short-circuits UNRELATED clean
+  // requests with a cached 400 (production 2026-09-16: every poisoned turn
+  // cooled the account, clean single-turn calls failed for ~30s windows).
+  { text: "invalid `signature`",              cooldownMs: 0 },
+  { text: "invalid signature",                cooldownMs: 0 },
   { text: "rate limit",                backoff: true },
   { text: "too many requests",         backoff: true },
   { text: "quota exceeded",            backoff: true },
