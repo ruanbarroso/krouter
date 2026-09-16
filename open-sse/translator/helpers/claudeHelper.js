@@ -289,10 +289,20 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
           let hasToolUse = false;
           let hasThinking = false;
 
-          // Always replace signature for all thinking blocks
+          // Only fill in the fallback signature when the block carries none.
+          // An Anthropic-issued signature is only valid byte-for-byte: replay it
+          // verbatim. Stamping every block with DEFAULT_THINKING_CLAUDE_SIGNATURE
+          // made every multi-turn request to a real Claude endpoint 400 with
+          // "Invalid `signature` in `thinking` block" (production 2026-09-16:
+          // 116/116 claude-provider errors, combo saved only by kiro fallback).
+          // Blocks minted by a provider that issues no signature keep the
+          // previous fallback behavior — forging is their only chance, however
+          // slim, since Anthropic rejects unsigned thinking blocks outright.
           for (const block of msg.content) {
             if (block.type === "thinking" || block.type === "redacted_thinking") {
-              block.signature = DEFAULT_THINKING_CLAUDE_SIGNATURE;
+              if (typeof block.signature !== "string" || block.signature.length === 0) {
+                block.signature = DEFAULT_THINKING_CLAUDE_SIGNATURE;
+              }
               hasThinking = true;
             }
             if (block.type === "tool_use") hasToolUse = true;
