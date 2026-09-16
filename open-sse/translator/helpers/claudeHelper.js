@@ -300,12 +300,17 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
           const kept = [];
           for (const block of msg.content) {
             if (block.type === "thinking") {
-              // Signed: replay verbatim. Unsigned (history translated in from
-              // a provider that mints none, e.g. kiro reasoning): drop — a
-              // forged signature can never validate, while a dropped block
-              // lets the call through whenever thinking isn't structurally
-              // required below.
-              if (typeof block.signature === "string" && block.signature.length > 0) {
+              // Signed AND non-empty: replay verbatim — an Anthropic signature
+              // is only valid byte-for-byte over its exact text. Unsigned
+              // blocks (history translated in from providers that mint none,
+              // e.g. kiro reasoning) are dropped: a forged signature can never
+              // validate. Signed-but-EMPTY blocks are dropped too: the
+              // signature binds the original non-empty text, so an emptied
+              // block (client compaction/normalization artifact, seen live on
+              // 583 blocks in one fleet session) is just as invalid.
+              const hasSig = typeof block.signature === "string" && block.signature.length > 0;
+              const hasText = typeof block.thinking === "string" && block.thinking.trim().length > 0;
+              if (hasSig && hasText) {
                 kept.push(block);
                 hasThinking = true;
                 sawSignedThinking = true;
