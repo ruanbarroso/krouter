@@ -80,6 +80,16 @@ describe("prepareClaudeRequest thinking signatures (provider claude)", () => {
     }
   });
 
+  it("drops signed-but-empty thinking blocks (signature binds the original text)", () => {
+    for (const block of [
+      { type: "thinking", thinking: "", signature: REAL_SIGNATURE },
+      { type: "thinking", thinking: "   ", signature: REAL_SIGNATURE },
+    ]) {
+      const out = prepareClaudeRequest(multiTurnBody(block), "claude");
+      expect(thinkingBlocksOf(out)).toHaveLength(0);
+    }
+  });
+
   it("strips stamped signatures off redacted_thinking blocks", () => {
     const out = prepareClaudeRequest(
       multiTurnBody({ type: "redacted_thinking", data: "ENCRYPTED", signature: REAL_SIGNATURE }),
