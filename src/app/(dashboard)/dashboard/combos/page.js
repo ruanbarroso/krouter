@@ -12,6 +12,14 @@ import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/sha
 // Validate combo name: only a-z, A-Z, 0-9, -, _
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
 
+// Combo entries can be plain "provider/model" strings or {model, reasoning}
+// objects (per-entry reasoning effort). ALWAYS render through this helper:
+// rendering an object directly throws "Objects are not valid as a React
+// child" and takes the whole list down (production 2026-09-16: 4 combos with
+// object entries blanked the entire /dashboard/combos page).
+const modelLabel = (entry) =>
+  entry == null ? "" : typeof entry === "string" ? entry : entry.model ?? JSON.stringify(entry);
+
 // 0.5.126 (upstream 8e59093d, adapted) — Capacity adapter: global fallback pools of
 // models per input-modality capability. A request needing a capability the target
 // model/combo lacks switches to the first enabled model here instead of dropping the
@@ -305,7 +313,7 @@ function ComboCard({ combo, activeProviders = [], copied, onCopy, onEdit, onDele
               ) : (
                 combo.models.slice(0, 3).map((model, index) => (
                   <code key={index} className="max-w-full truncate rounded bg-black/5 px-1.5 py-0.5 font-mono text-[10px] text-text-muted dark:bg-white/5 sm:max-w-[220px]">
-                    {model}
+                    {modelLabel(model)}
                   </code>
                 ))
               )}
@@ -323,7 +331,7 @@ function ComboCard({ combo, activeProviders = [], copied, onCopy, onEdit, onDele
                   title="Pick the model that fuses panel answers"
                 >
                   <span className="material-symbols-outlined text-[13px]">gavel</span>
-                  <span className="truncate">{judge || `Auto — ${combo.models[0] || "first model"}`}</span>
+                  <span className="truncate">{judge || `Auto — ${modelLabel(combo.models[0]) || "first model"}`}</span>
                 </button>
                 {judge && (
                   <button
@@ -547,11 +555,11 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
     zIndex: isDragging ? 999 : undefined,
   };
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(model);
+  const [draft, setDraft] = useState(modelLabel(model));
   const commit = () => {
     const trimmed = draft.trim();
-    if (trimmed && trimmed !== model) onEdit(trimmed);
-    else setDraft(model);
+    if (trimmed && trimmed !== modelLabel(model)) onEdit(trimmed);
+    else setDraft(modelLabel(model));
     setEditing(false);
   };
 
@@ -600,7 +608,7 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
           onClick={() => setEditing(true)}
           title="Click to edit"
         >
-          {model}
+          {modelLabel(model)}
         </div>
       )}
 
@@ -700,13 +708,13 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
   };
 
   const handleAddModel = (model) => {
-    if (!models.includes(model.value)) {
+    if (!models.map(modelLabel).includes(model.value)) {
       setModels([...models, model.value]);
     }
   };
 
   const handleDeselectModel = (model) => {
-    setModels(models.filter((m) => m !== model.value));
+    setModels(models.filter((m) => modelLabel(m) !== model.value));
   };
 
   const handleRemoveModel = (index) => {
@@ -831,7 +839,7 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
         modelAliases={modelAliases}
         title="Add Model to Combo"
         kindFilter={kindFilter}
-        addedModelValues={models}
+        addedModelValues={models.map(modelLabel)}
         closeOnSelect={false}
       />
     </>
