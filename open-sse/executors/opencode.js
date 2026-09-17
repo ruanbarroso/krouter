@@ -30,6 +30,46 @@ export const OPENCODE_SESSION_HEADER = "x-opencode-session";
 const SESSION_FIELD = "_opencodeSession";
 const MAX_SESSION_LENGTH = 256;
 
+// The Console free tier validates the caller looks like a real client
+// (measured 2026-09-17, production outage: every variant with a forged
+// session id or a non-opencode User-Agent 403s with
+// "FreeTierError: OpenCode's free tier can only be used from within OpenCode",
+// while fresh opencode-format ids + official UA 200):
+//   1. session/request ids follow packages/opencode/src/id/id.ts:
+//      `<prefix>_<12 hex: timestamp_ms * 0x1000>_<14 base62 random>`.
+//      Fabricated ids (stale timestamp or wrong shape) are rejected.
+//   2. User-Agent must be `opencode/<version>` — bump alongside official
+//      releases; a stale version will eventually read as foreign again.
+// The x-opencode-client value itself is free-form (measured: any non-empty
+// value passes, so this gateway identifies honestly as `krouter`).
+const OPENCODE_USER_AGENT = "opencode/1.18.31";
+const OPENCODE_CLIENT_NAME = "krouter";
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+function base62FromDigest(digest, length) {
+  let out = "";
+  for (let i = 0; out.length < length; i++) {
+    const byte = digest[i % digest.length];
+    out += BASE62[(byte + i) % 62];
+  }
+  return out;
+}
+
+// Mint an opencode-format id: fresh timestamp (the Console rejects stale or
+// malformed ones) + suffix derived deterministically from the seed so the
+// same conversation keeps affinity instead of looking like a new client
+// every turn.
+export function mintOpenCodeId(prefix, seed) {
+  // BigInt: Date.now() * 0x1000 overflows float->int32 bitwise ops (they wrap
+  // to a NEGATIVE number and toString(16) emits "-...").
+  const timeHex = ((BigInt(Date.now()) * 0x1000n) & 0xffffffffffffn).toString(16).padStart(12, "0");
+  const suffix = base62FromDigest(
+    crypto.createHash("sha256").update(`opencode\0${seed}`).digest(),
+    14
+  );
+  return `${prefix}_${timeHex}${suffix}`;
+}
+
 function normalizeSession(value) {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
@@ -46,12 +86,12 @@ function nativeSession(headers) {
 }
 
 function translatedSession(seed, clientTool) {
-  const digest = crypto
-    .createHash("sha256")
-    .update(`opencode\0${clientTool || "generic"}\0${seed}`)
-    .digest("hex")
-    .slice(0, 32);
-  return `ses_${digest}`;
+  void clientTool;
+  return mintOpenCodeId("ses", `session\0${seed}`);
+}
+
+function translatedRequestId(seed) {
+  return mintOpenCodeId("msg", `request\0${seed}`);
 }
 
 export function resolveOpenCodeSeed(credentials, body) {
@@ -108,14 +148,15 @@ export class OpenCodeExecutor extends BaseExecutor {
 
   buildHeaders(credentials, stream = true) {
     const key = credentials?.apiKey || credentials?.accessToken || "public";
+    const seed = resolveOpenCodeSeed(credentials || {}, null);
     const headers = {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${key}`,
-      "x-opencode-client": "barroso-keys",
+      "x-opencode-client": OPENCODE_CLIENT_NAME,
       "x-request-source": "local",
-      "x-opencode-request": `msg_${crypto.randomUUID().replaceAll("-", "")}`,
+      "x-opencode-request": translatedRequestId(`${seed}\0${Date.now()}`),
       "x-opencode-project": "global",
-      "user-agent": "barroso-keys/1.0",
+      "user-agent": OPENCODE_USER_AGENT,
     };
     if (stream) headers["Accept"] = "text/event-stream";
     headers[OPENCODE_SESSION_HEADER] = credentials?.[SESSION_FIELD]

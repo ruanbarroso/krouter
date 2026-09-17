@@ -76,20 +76,27 @@ describe("OpenCode muse-spark routing", () => {
 
   it("sends a Responses body with the session header", async () => {
     const { headers, body } = await run();
-    expect(headers[OPENCODE_SESSION_HEADER]).toMatch(/^ses_[0-9a-f]{32}$/);
+    // opencode id.ts shape: ses_ + 12 hex timestamp + 14 base62. The Console
+    // rejects forged/stale ids (2026-09-17 FreeTierError storm).
+    expect(headers[OPENCODE_SESSION_HEADER]).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
     expect(headers["x-request-source"]).toBe("local");
+    expect(headers["user-agent"]).toMatch(/^opencode\//);
     expect(body.model).toBe("muse-spark-1.6-contributor-free");
     expect(Array.isArray(body.input)).toBe(true);
   });
 
-  it("is stable across turns and namespaces tools", async () => {
+  it("keeps a stable suffix per conversation with a fresh timestamp", async () => {
+    const suffixOf = (h) => h[OPENCODE_SESSION_HEADER].slice("ses_".length + 12);
     const a = await run();
     proxyAwareFetch.mockClear();
     const b = await run();
-    expect(b.headers[OPENCODE_SESSION_HEADER]).toBe(a.headers[OPENCODE_SESSION_HEADER]);
+    // Same conversation seed → same suffix (affinity signal); the timestamp
+    // prefix is re-minted every call because the Console rejects stale ids.
+    expect(suffixOf(b.headers)).toBe(suffixOf(a.headers));
+    expect(b.headers[OPENCODE_SESSION_HEADER]).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
     proxyAwareFetch.mockClear();
     const c = await run({ clientTool: "codex" });
-    expect(c.headers[OPENCODE_SESSION_HEADER]).not.toBe(a.headers[OPENCODE_SESSION_HEADER]);
+    expect(suffixOf(c.headers)).toBe(suffixOf(a.headers));
   });
 
   it("preserves a native session and never mutates caller creds", async () => {
