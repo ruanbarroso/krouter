@@ -98,14 +98,13 @@ export async function getComboModels(modelStr) {
 
   const combo = await getComboByName(modelStr);
   if (combo && combo.models && combo.models.length > 0) {
-    // Entries can be plain "provider/model" strings or {model, reasoning}
-    // objects (per-entry reasoning effort, PR #5 unmerged). The execution
-    // path below is string-only: an object reaches parseModel().includes and
-    // every request 500s (production 2026-09-16: barroso-chat). Normalize to
-    // ids here; effort application waits for PR #5.
-    return combo.models
-      .map((e) => (e && typeof e === "object" ? e.model : e))
-      .filter(Boolean);
+    // Pass entries through VERBATIM — strings and {model, reasoning} objects
+    // alike. The execution path (open-sse/services/combo.js, via
+    // getComboEntryModel/applyComboEntryReasoning) handles both shapes and
+    // applies per-entry reasoning effort. Normalizing to ids here would
+    // silently drop the effort config (that was the emergency shim of
+    // 2026-09-16 before feat/combo-reasoning-effort merged; see PR #5).
+    return combo.models;
   }
   return null;
 }
