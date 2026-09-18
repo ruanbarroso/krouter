@@ -18,6 +18,7 @@
 //   path under 1ms even when /api/usage is mid-fetch.
 
 import { getUsageForProvider } from "./usage.js";
+import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 
 const DEFAULT_MIN_REMAINING_PERCENT = 2;
 const CACHE_TTL_MS = 60 * 1000; // 60s, same as OmniRoute's CACHE_TTL_MS
@@ -82,6 +83,29 @@ function toFinitePct(v) {
   return null;
 }
 
+// The usage endpoints are upstream provider APIs (codewhisperer, q.amazonaws,
+// api.anthropic, …), so they must egress through the connection's proxy pool
+// exactly like the chat request does. Omitting this sent every quota poll out
+// from the host's own IP — silently, because fetchAndCache swallows errors.
+// Found 2026-09-18 on llm.barroso.tec.br: KROUTER_REQUIRE_PROXY surfaced a
+// refused direct egress to q.us-east-1.amazonaws.com coming from here.
+async function proxyOptionsFor(connection) {
+  try {
+    const cfg = await resolveConnectionProxyConfig(connection?.providerSpecificData || {});
+    return {
+      connectionProxyEnabled: cfg.connectionProxyEnabled === true,
+      connectionProxyUrl: cfg.connectionProxyUrl || "",
+      connectionNoProxy: cfg.connectionNoProxy || "",
+      vercelRelayUrl: cfg.vercelRelayUrl || "",
+      strictProxy: cfg.strictProxy === true,
+    };
+  } catch {
+    // A pool lookup failure must not turn a quota poll into a hard error —
+    // the caller treats null as "no quota data" and lets the request through.
+    return null;
+  }
+}
+
 // Background fetch — returns a Promise that resolves to per-model quotas
 // or null. Stores in cache + dedupes concurrent calls for the same key.
 async function fetchAndCache(provider, connectionId, connection) {
@@ -91,7 +115,7 @@ async function fetchAndCache(provider, connectionId, connection) {
 
   const promise = (async () => {
     try {
-      const usage = await getUsageForProvider(connection);
+      const usage = await getUsageForProvider(connection, await proxyOptionsFor(connection));
       const byModel = convertUsageToModelQuotas(usage);
       if (byModel) {
         cache.set(key, { byModel, fetchedAt: nowMs() });
