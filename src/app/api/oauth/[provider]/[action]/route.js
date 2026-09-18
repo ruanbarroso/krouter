@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import { 
   getProvider, 
   generateAuthData, 
-  exchangeTokens, 
-  requestDeviceCode, 
+  exchangeTokens,
+  requestDeviceCode,
   pollForToken,
-  resolveOAuthProxyOptions
+  resolveOAuthProxyOptions,
+  resolveOAuthEgress,
+  describeOAuthEgressFailure
 } from "@/lib/oauth/providers";
 import { createProviderConnection } from "@/models";
 import {
@@ -63,6 +65,27 @@ async function completeXaiManualCode(code, state) {
 }
 
 /**
+ * Build the 500 body for a failed OAuth call. A network-level failure gets the
+ * egress path it took appended, so "fetch failed" stops being a dead end on
+ * hosts whose outbound traffic is restricted; anything the provider actually
+ * answered is passed through untouched.
+ */
+async function oauthErrorResponse(error, provider) {
+  let message = error?.message || String(error);
+  try {
+    const explained = describeOAuthEgressFailure(
+      error,
+      await resolveOAuthEgress(provider),
+      provider
+    );
+    if (explained) message = explained;
+  } catch {
+    // Diagnosing a failure must never replace it with a different one.
+  }
+  return NextResponse.json({ error: message }, { status: 500 });
+}
+
+/**
  * Dynamic OAuth API Route
  * Handles: authorize, exchange, device-code, poll
  */
@@ -70,8 +93,11 @@ async function completeXaiManualCode(code, state) {
 // GET /api/oauth/[provider]/authorize - Generate auth URL
 // GET /api/oauth/[provider]/device-code - Request device code (for device_code flow)
 export async function GET(request, { params }) {
+  // Hoisted so the catch can name the provider when diagnosing egress.
+  let providerName = "";
   try {
     const { provider, action } = await params;
+    providerName = provider;
     const { searchParams } = new URL(request.url);
 
     if (action === "authorize") {
@@ -175,15 +201,18 @@ export async function GET(request, { params }) {
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   } catch (error) {
     console.log("OAuth GET error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return oauthErrorResponse(error, providerName);
   }
 }
 
 // POST /api/oauth/[provider]/exchange - Exchange code for tokens and save
 // POST /api/oauth/[provider]/poll - Poll for token (device_code flow)
 export async function POST(request, { params }) {
+  // Hoisted so the catch can name the provider when diagnosing egress.
+  let providerName = "";
   try {
     const { provider, action } = await params;
+    providerName = provider;
     let body;
     try {
       body = await request.json();
@@ -344,6 +373,6 @@ export async function POST(request, { params }) {
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   } catch (error) {
     console.log("OAuth POST error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return oauthErrorResponse(error, providerName);
   }
 }

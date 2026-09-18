@@ -22,6 +22,8 @@ import {
   pollForToken,
   generateAuthData,
   resolveOAuthProxyOptions,
+  resolveOAuthEgress,
+  describeOAuthEgressFailure,
 } from "../../src/lib/oauth/providers.js";
 import { runWithOAuthProxy } from "../../src/lib/oauth/proxyContext.js";
 import { getSettings } from "../../src/lib/localDb";
@@ -164,5 +166,126 @@ describe("resolveOAuthProxyOptions", () => {
     getSettings.mockRejectedValue(new Error("db locked"));
 
     expect(await resolveOAuthProxyOptions("claude")).toBeNull();
+  });
+});
+
+describe("resolveOAuthEgress", () => {
+  it("reports mode pool with the pool id when resolution succeeds", async () => {
+    getSettings.mockResolvedValue({ providerStrategies: { claude: { proxyPoolId: "pool-1" } } });
+    resolveConnectionProxyConfig.mockResolvedValue(POOL_PROXY);
+
+    expect(await resolveOAuthEgress("claude")).toEqual({
+      proxyOptions: POOL_PROXY,
+      poolId: "pool-1",
+      mode: "pool",
+      detail: "",
+    });
+  });
+
+  it("reports mode unconfigured when the provider has no pool", async () => {
+    getSettings.mockResolvedValue({ providerStrategies: { opencode: { proxyPoolId: "pool-1" } } });
+
+    const egress = await resolveOAuthEgress("codex");
+
+    expect(egress.mode).toBe("unconfigured");
+    expect(egress.proxyOptions).toBeNull();
+    expect(resolveConnectionProxyConfig).not.toHaveBeenCalled();
+  });
+
+  it("reports mode unresolved, keeping the pool id, when the pool has no relay", async () => {
+    getSettings.mockResolvedValue({ providerStrategies: { claude: { proxyPoolId: "pool-9" } } });
+    resolveConnectionProxyConfig.mockResolvedValue({
+      source: "none",
+      connectionProxyEnabled: false,
+      connectionProxyUrl: "",
+      vercelRelayUrl: "",
+    });
+
+    const egress = await resolveOAuthEgress("claude");
+
+    expect(egress.mode).toBe("unresolved");
+    expect(egress.poolId).toBe("pool-9");
+    expect(egress.proxyOptions).toBeNull();
+  });
+
+  it("reports mode error with the detail instead of throwing", async () => {
+    getSettings.mockRejectedValue(new Error("db locked"));
+
+    const egress = await resolveOAuthEgress("claude");
+
+    expect(egress.mode).toBe("error");
+    expect(egress.detail).toBe("db locked");
+    expect(egress.proxyOptions).toBeNull();
+  });
+});
+
+describe("describeOAuthEgressFailure", () => {
+  const fetchFailed = () => {
+    const err = new TypeError("fetch failed");
+    err.cause = Object.assign(new Error("connect ECONNREFUSED 160.79.104.10:443"), {
+      code: "ECONNREFUSED",
+    });
+    return err;
+  };
+
+  it("names the missing setting when the flow went direct with no pool configured", () => {
+    const msg = describeOAuthEgressFailure(
+      fetchFailed(),
+      { proxyOptions: null, poolId: "", mode: "unconfigured", detail: "" },
+      "codex"
+    );
+
+    expect(msg).toContain("fetch failed");
+    expect(msg).toContain("no egress proxy pool is configured");
+    expect(msg).toContain("providerStrategies.codex.proxyPoolId");
+  });
+
+  it("blames the pool when the flow did go through one", () => {
+    const msg = describeOAuthEgressFailure(
+      fetchFailed(),
+      { proxyOptions: POOL_PROXY, poolId: "bk-a", mode: "pool", detail: "" },
+      "claude"
+    );
+
+    expect(msg).toContain('proxy pool "bk-a"');
+    expect(msg).not.toContain("no egress proxy pool is configured");
+  });
+
+  it("surfaces the resolution detail when resolution itself failed", () => {
+    const msg = describeOAuthEgressFailure(
+      fetchFailed(),
+      { proxyOptions: null, poolId: "bk-a", mode: "error", detail: "db locked" },
+      "claude"
+    );
+
+    expect(msg).toContain("db locked");
+  });
+
+  it("detects a network failure through the cause chain, not just the message", () => {
+    const err = new Error("request to token endpoint failed");
+    err.cause = Object.assign(new Error("boom"), { code: "ENETUNREACH" });
+
+    const msg = describeOAuthEgressFailure(
+      err,
+      { mode: "unconfigured", poolId: "", detail: "" },
+      "kiro"
+    );
+
+    expect(msg).not.toBeNull();
+    expect(msg).toContain("kiro");
+  });
+
+  it("leaves a provider answer untouched — invalid_grant is not an egress problem", () => {
+    const err = new Error(
+      'Token exchange failed: {"error": "invalid_grant", "error_description": "Invalid code"}'
+    );
+
+    expect(
+      describeOAuthEgressFailure(err, { mode: "unconfigured", poolId: "", detail: "" }, "claude")
+    ).toBeNull();
+  });
+
+  it("returns null for no error at all", () => {
+    expect(describeOAuthEgressFailure(null, { mode: "pool", poolId: "p" }, "claude")).toBeNull();
   });
 });

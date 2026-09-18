@@ -44,27 +44,107 @@ async function oauthFetch(url, options = {}, proxyOptions = null) {
 }
 
 /**
- * Resolve the egress proxy for a provider's OAuth connect flow from the
+ * Resolve the egress path for a provider's OAuth connect flow from the
  * provider strategy settings (same source the dashboard's ConnectionsCard
- * writes). Returns the resolveConnectionProxyConfig() shape, or null when
- * the provider has no pool configured — meaning "direct, as before".
+ * writes).
+ *
+ * Returns { proxyOptions, poolId, mode, detail }. Only mode "pool" carries
+ * proxyOptions; every other mode means "direct, as before this change":
+ *   "pool"         resolved a pool, requests go through it
+ *   "unconfigured" provider has no proxyPoolId in providerStrategies
+ *   "unresolved"   pool is set but resolved to no usable relay
+ *   "error"        resolution threw; `detail` carries the message
+ *
+ * Resolution never throws, because a proxy lookup must not break a connect
+ * flow that would otherwise work. It does, however, report *why* it fell
+ * back to direct: on a host with fail-closed egress, "direct" is not a
+ * graceful degradation but a guaranteed failure, and the mode is the only
+ * thing that can turn the resulting `fetch failed` into an actionable
+ * message. See describeOAuthEgressFailure().
  */
-export async function resolveOAuthProxyOptions(providerName) {
+export async function resolveOAuthEgress(providerName) {
+  const direct = (mode, poolId = "", detail = "") => ({
+    proxyOptions: null,
+    poolId,
+    mode,
+    detail,
+  });
+  if (!providerName) return direct("unconfigured");
+  let poolId = "";
   try {
-    if (!providerName) return null;
     const { getSettings } = await import("@/lib/localDb");
     const settings = await getSettings();
     const poolIdRaw = (settings?.providerStrategies || {})[providerName]?.proxyPoolId;
-    const poolId = typeof poolIdRaw === "string" ? poolIdRaw.trim() : "";
-    if (!poolId) return null;
+    poolId = typeof poolIdRaw === "string" ? poolIdRaw.trim() : "";
+    if (!poolId) return direct("unconfigured");
     const { resolveConnectionProxyConfig } = await import("@/lib/network/connectionProxy");
     const resolved = await resolveConnectionProxyConfig({ proxyPoolId: poolId });
-    if (!resolved || (!resolved.connectionProxyUrl && !resolved.vercelRelayUrl)) return null;
-    return resolved;
-  } catch {
-    // Proxy resolution must never break the connect flow — worst case the
-    // exchange goes direct, exactly like before this change.
-    return null;
+    if (!resolved || (!resolved.connectionProxyUrl && !resolved.vercelRelayUrl)) {
+      console.warn(
+        `[oauth] proxy pool "${poolId}" for provider "${providerName}" resolved to no usable relay; OAuth will go direct`
+      );
+      return direct("unresolved", poolId);
+    }
+    return { proxyOptions: resolved, poolId, mode: "pool", detail: "" };
+  } catch (error) {
+    const detail = error?.message || String(error);
+    console.warn(
+      `[oauth] proxy resolution failed for provider "${providerName}": ${detail}; OAuth will go direct`
+    );
+    return direct("error", poolId, detail);
+  }
+}
+
+/**
+ * Thin wrapper over resolveOAuthEgress() for call sites that only need the
+ * proxy options. Returns the resolveConnectionProxyConfig() shape, or null
+ * when the flow should go direct.
+ */
+export async function resolveOAuthProxyOptions(providerName) {
+  const egress = await resolveOAuthEgress(providerName);
+  return egress.proxyOptions;
+}
+
+// Network-level failures, as opposed to an answer from the OAuth server.
+// undici surfaces most of these as a bare `fetch failed` whose cause holds
+// the real code, so match the message and the cause chain.
+const NETWORK_ERROR_PATTERN =
+  /fetch failed|ECONNREFUSED|ECONNRESET|ENETUNREACH|EHOSTUNREACH|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|UND_ERR|other side closed/i;
+
+function isNetworkError(error) {
+  for (let e = error, depth = 0; e && depth < 5; e = e.cause, depth++) {
+    const text = `${e.message || ""} ${e.code || ""}`;
+    if (NETWORK_ERROR_PATTERN.test(text)) return true;
+  }
+  return false;
+}
+
+/**
+ * Turn a network-level OAuth failure into a message that says which egress
+ * path was taken and what to change. Returns null for anything that is not a
+ * network failure — an `invalid_grant` from the provider is the provider
+ * talking, and must reach the user unedited.
+ *
+ * This exists because the opposite — swallowing the egress decision and
+ * surfacing a bare `fetch failed` — sent a real operator hunting a deployed,
+ * working fix for half an hour: the code was live, the provider simply had no
+ * pool configured, and nothing in the error said so.
+ */
+export function describeOAuthEgressFailure(error, egress, providerName = "") {
+  if (!error || !isNetworkError(error)) return null;
+  const base = error.message || String(error);
+  const provider = providerName || "this provider";
+  const label = `${base} — the ${provider} OAuth request could not reach the token endpoint`;
+  switch (egress?.mode) {
+    case "pool":
+      return `${label} through proxy pool "${egress.poolId}". Check that the pool's relays are up and reachable from this host.`;
+    case "unresolved":
+      return `${label}: it went out direct because proxy pool "${egress.poolId}" (configured for "${provider}") resolved to no usable relay. Fix the pool or point providerStrategies.${provider}.proxyPoolId at a working one.`;
+    case "error":
+      return `${label}: it went out direct because resolving the configured proxy pool failed (${egress.detail}).`;
+    case "unconfigured":
+    default:
+      return `${label}: it went out direct because no egress proxy pool is configured for "${provider}". If this host blocks direct outbound traffic, set providerStrategies.${provider}.proxyPoolId to a proxy pool and retry.`;
   }
 }
 
