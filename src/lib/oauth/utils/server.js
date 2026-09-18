@@ -210,7 +210,7 @@ export function startCodexProxy(appPort) {
           if (!code) throw new Error("No authorization code received");
 
           // Lazy import to avoid circular deps
-          const { exchangeTokens } = await import("../providers.js");
+          const { exchangeTokens, resolveOAuthProxyOptions } = await import("../providers.js");
           const { createProviderConnection } = await import("@/models");
 
           const tokenData = await exchangeTokens(
@@ -218,7 +218,9 @@ export function startCodexProxy(appPort) {
             code,
             session.redirectUri,
             session.codeVerifier,
-            state
+            state,
+            undefined,
+            await resolveOAuthProxyOptions("codex").catch(() => null)
           );
           const connection = await createProviderConnection({
             provider: "codex",
@@ -352,7 +354,7 @@ export function startXaiProxy(appPort) {
           }
           if (!code) throw new Error("No authorization code received");
 
-          const { exchangeTokens } = await import("../providers.js");
+          const { exchangeTokens, resolveOAuthProxyOptions } = await import("../providers.js");
           const { createProviderConnection } = await import("@/models");
 
           const tokenData = await exchangeTokens(
@@ -360,7 +362,9 @@ export function startXaiProxy(appPort) {
             code,
             session.redirectUri,
             session.codeVerifier,
-            state
+            state,
+            undefined,
+            await resolveOAuthProxyOptions("xai").catch(() => null)
           );
           const connection = await createProviderConnection({
             provider: "xai",
