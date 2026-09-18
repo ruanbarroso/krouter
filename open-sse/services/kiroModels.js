@@ -22,6 +22,31 @@
 import { v4 as uuidv4 } from "uuid";
 import { createHash } from "crypto";
 import { refreshKiroToken } from "./tokenRefresh.js";
+import { proxyAwareFetch } from "../utils/proxyFetch.js";
+
+// ListAvailableModels is an upstream AWS endpoint (q.<region>.amazonaws.com),
+// so it has to leave through the connection's relay pool like every other
+// upstream call. It used the bare global fetch until 2026-09-18, which meant
+// the model catalog was fetched from the host's own IP on every cache miss —
+// visible only once KROUTER_REQUIRE_PROXY started refusing it.
+async function proxyOptionsFor(credentials, log) {
+  const psd = credentials?.providerSpecificData;
+  if (!psd || typeof psd !== "object") return null;
+  try {
+    const { resolveConnectionProxyConfig } = await import("@/lib/network/connectionProxy");
+    const cfg = await resolveConnectionProxyConfig(psd);
+    return {
+      connectionProxyEnabled: cfg.connectionProxyEnabled === true,
+      connectionProxyUrl: cfg.connectionProxyUrl || "",
+      connectionNoProxy: cfg.connectionNoProxy || "",
+      vercelRelayUrl: cfg.vercelRelayUrl || "",
+      strictProxy: cfg.strictProxy === true,
+    };
+  } catch (e) {
+    log?.warn?.("KIRO_MODELS", `Proxy pool lookup failed: ${e?.message || e}`);
+    return null;
+  }
+}
 
 const KIRO_RUNTIME_SDK_VERSION = "1.0.0";
 const KIRO_AGENT_OS = "windows";
@@ -156,7 +181,7 @@ function formatDisplayName(modelName, modelId, rateMultiplier) {
  * Fetch the raw model catalog from Kiro. Returns the array under `.models`
  * from the API response, or throws on network/HTTP error.
  */
-async function fetchKiroCatalogRaw(credentials, signal) {
+async function fetchKiroCatalogRaw(credentials, signal, proxyOptions = null) {
   const profileArn = credentials?.providerSpecificData?.profileArn || "";
   const region = regionFromProfileArn(profileArn);
   const params = new URLSearchParams();
@@ -178,11 +203,11 @@ async function fetchKiroCatalogRaw(credentials, signal) {
 
   let response;
   try {
-    response = await fetch(url, {
+    response = await proxyAwareFetch(url, {
       method: "GET",
       headers,
       signal: controller.signal
-    });
+    }, proxyOptions);
   } finally {
     clearTimeout(timer);
   }
@@ -248,16 +273,19 @@ export async function resolveKiroModels(credentials, options = {}) {
     }
   }
 
+  const proxyOptions = await proxyOptionsFor(credentials, options.log);
+
   let raw;
   try {
-    raw = await fetchKiroCatalogRaw(credentials, options.signal);
+    raw = await fetchKiroCatalogRaw(credentials, options.signal, proxyOptions);
   } catch (err) {
     if (err && err.status === 401 && credentials.refreshToken) {
       options.log?.info?.("KIRO_MODELS", "Got 401 from Kiro; refreshing token");
       const refreshed = await refreshKiroToken(
         credentials.refreshToken,
         credentials.providerSpecificData,
-        options.log
+        options.log,
+        proxyOptions
       );
       if (refreshed?.accessToken) {
         const next = { ...credentials, ...refreshed };
@@ -267,7 +295,7 @@ export async function resolveKiroModels(credentials, options = {}) {
           }
         }
         try {
-          raw = await fetchKiroCatalogRaw(next, options.signal);
+          raw = await fetchKiroCatalogRaw(next, options.signal, proxyOptions);
           // Update the in-memory credential reference too so retry logic uses
           // the fresh token consistently.
           credentials.accessToken = next.accessToken;
