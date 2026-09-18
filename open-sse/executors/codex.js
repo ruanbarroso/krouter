@@ -38,6 +38,12 @@ const CODEX_PASSTHROUGH_TOOL_TYPES = new Set(["custom"]);
 // Allowlist of fields accepted by Codex Responses API — anything else is stripped
 const RESPONSES_API_ALLOWLIST = new Set([
   "model", "input", "instructions", "tools", "tool_choice", "stream", "store",
+  // `text` carries the Responses API's JSON contract (text.format). Without it
+  // here the allowlist deleted the field right after the translator built it,
+  // so response_format died one step later than it did on Gemini. The grok-cli
+  // executor, same API, already allows it. Only present when the caller asked
+  // for a JSON format, so ordinary traffic is unchanged.
+  "text",
   "reasoning", "service_tier", "include", "prompt_cache_key", "client_metadata"
 ]);
 

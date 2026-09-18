@@ -183,3 +183,26 @@ describe("Responses API: response_format -> text.format", () => {
     expect(out.text.format).toEqual({ type: "json_object" });
   });
 });
+
+describe("Codex executor: text.format survives the allowlist", () => {
+  it("keeps text when the caller asked for a JSON format", async () => {
+    const { CodexExecutor } = await import("../../open-sse/executors/codex.js");
+    const body = openaiToOpenAIResponsesRequest("gpt-5.6-luna", {
+      messages: MESSAGES,
+      response_format: jsonSchemaFormat()
+    }, true);
+
+    // The final allowlist filter used to delete text right after the translator
+    // built it, so the fix above died one step later than it did on Gemini.
+    const out = new CodexExecutor().transformRequest("gpt-5.6-luna", body, true, null);
+    expect(out.text.format.type).toBe("json_schema");
+    expect(out.text.format.schema).toEqual(SCHEMA);
+  });
+
+  it("does not invent a text field for ordinary traffic", async () => {
+    const { CodexExecutor } = await import("../../open-sse/executors/codex.js");
+    const body = openaiToOpenAIResponsesRequest("gpt-5.6-luna", { messages: MESSAGES }, true);
+    const out = new CodexExecutor().transformRequest("gpt-5.6-luna", body, true, null);
+    expect(out.text).toBeUndefined();
+  });
+});
