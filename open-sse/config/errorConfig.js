@@ -138,6 +138,12 @@ export const ERROR_RULES = [
   // cooled the account, clean single-turn calls failed for ~30s windows).
   { text: "invalid `signature`",              cooldownMs: 0 },
   { text: "invalid signature",                cooldownMs: 0 },
+  // 2026-09-18 — Imagem que o modelo não processa ("Unable to process input
+  // image", INVALID_ARGUMENT do Gemini). O PEDIDO é o problema, não a conta:
+  // travar a conta 30 s por isso pune tráfego limpo e, com vision em rajada,
+  // encadeia locks (~300/h medidos). Sem lock (cooldownMs: 0) e COM fallback
+  // — o próximo modelo pode ler a imagem — igual à thinking signature acima.
+  { text: "unable to process input image",    cooldownMs: 0 },
   { text: "rate limit",                backoff: true },
   { text: "too many requests",         backoff: true },
   { text: "quota exceeded",            backoff: true },

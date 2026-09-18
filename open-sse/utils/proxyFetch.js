@@ -5,6 +5,29 @@ import { dbg } from "./debugLog.js";
 const originalFetch = globalThis.fetch;
 const proxyDispatchers = new Map();
 
+// ─── Upstream lendo devagar vs proxy quebrado ───────────────────────────────
+// O timer de headers dos executores (base.js, qoder.js) aborta o fetch quando
+// o UPSTREAM não devolve headers a tempo — o proxy pode ter conectado bem.
+// Sem a distinção, um upstream lento sob strictProxy sai no log como "Proxy
+// required but failed" e toda investigação vai para a camada errada (medido
+// 2026-09-18: relays íntegros com credencial válida, NVIDIA lenta; 100% das
+// tentativas rotuladas como falha de proxy).
+//
+// O marcador viaja no `code` do motivo do abort (o fetch rejeita com ele), e
+// a mensagem legada continua valendo como segunda via para quem aborta com
+// `Error` puro. Desconexão do cliente não casa: ela aborta com AbortError
+// (DOMException), sem este código nem esta mensagem.
+export const UPSTREAM_HEADERS_TIMEOUT_CODE = "UPSTREAM_HEADERS_TIMEOUT";
+export function newUpstreamHeadersTimeoutError() {
+  const err = new Error("fetch connect timeout");
+  err.code = UPSTREAM_HEADERS_TIMEOUT_CODE;
+  return err;
+}
+export function isUpstreamHeadersTimeout(err) {
+  return err?.code === UPSTREAM_HEADERS_TIMEOUT_CODE
+    || /fetch connect timeout/i.test(String(err?.message || ""));
+}
+
 // ─── HTTPS Keep-Alive Agents (added 0.5.15) ─────────────────────────────────
 // Reuses TCP+TLS connections across requests to the same upstream so every
 // LLM call doesn't pay the ~150-300ms TLS handshake cost. Two surfaces use
@@ -382,6 +405,9 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
         return await originalFetch(url, { ...options, dispatcher });
       } catch (proxyError) {
         if (proxyOptions?.strictProxy === true) {
+          if (isUpstreamHeadersTimeout(proxyError)) {
+            throw new Error(`[ProxyFetch] Upstream timed out waiting for response headers (strictProxy=true: failing closed without direct attempt): ${proxyError.message}`);
+          }
           throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
         }
         console.warn(`[ProxyFetch] Proxy failed, falling back to direct bypass: ${proxyError.message}`);
@@ -404,6 +430,9 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
     } catch (proxyError) {
       // If strictProxy is enabled, fail hard instead of falling back to direct
       if (proxyOptions?.strictProxy === true) {
+        if (isUpstreamHeadersTimeout(proxyError)) {
+          throw new Error(`[ProxyFetch] Upstream timed out waiting for response headers (strictProxy=true: failing closed without direct attempt): ${proxyError.message}`);
+        }
         throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
       }
       console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${proxyError.message}`);
