@@ -291,6 +291,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         connectionNoProxy: resolvedProxy.connectionNoProxy,
         connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
         vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+        // Thread the pool's fail-closed flag all the way to proxyAwareFetch.
+        // Without this, chatCore rebuilds proxyOptions without strictProxy and
+        // every proxy failure silently falls back to direct egress.
+        strictProxy: resolvedProxy.strictProxy === true,
       },
       connectionId: connection.id,
       // Include current status for optimization check
