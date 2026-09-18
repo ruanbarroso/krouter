@@ -44,7 +44,10 @@ function buildProxyOptions(cfg) {
     connectionProxyUrl: cfg.connectionProxyUrl || "",
     connectionNoProxy: cfg.connectionNoProxy || "",
     vercelRelayUrl: cfg.vercelRelayUrl || "",
-    strictProxy: false,
+    // Carry the pool's own flag instead of chumbando false: strictProxy means
+    // "if the relay fails, fail — do not fall back to a direct connection".
+    // Hardcoding false silently discarded that trava for every auto-ping.
+    strictProxy: cfg.strictProxy === true,
   };
 }
 
