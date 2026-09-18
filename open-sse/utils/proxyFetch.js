@@ -193,7 +193,18 @@ const MITM_BYPASS_HOSTS = [
   // refresh) was doing a manual Google-DNS resolve on every cache miss.
   "api.anthropic.com",
 ];
-const GOOGLE_DNS_SERVERS = ["8.8.8.8", "8.8.4.4"];
+// Resolver used to sidestep the /etc/hosts MITM spoof. Public DNS by default;
+// KROUTER_DNS_SERVERS overrides it for hosts whose egress firewall only allows
+// the local stub — a fail-closed deployment REJECTs 8.8.8.8:53 outright, and
+// every bypass resolve then dies with ECONNREFUSED (measured 2026-09-18).
+const DEFAULT_DNS_SERVERS = ["8.8.8.8", "8.8.4.4"];
+
+function configuredDnsServers() {
+  const raw = normalizeString(process.env.KROUTER_DNS_SERVERS);
+  if (!raw) return DEFAULT_DNS_SERVERS;
+  const servers = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  return servers.length ? servers : DEFAULT_DNS_SERVERS;
+}
 const HTTPS_PORT = 443;
 const HTTP_SUCCESS_MIN = 200;
 const HTTP_SUCCESS_MAX = 300;
@@ -210,19 +221,50 @@ async function resolveRealIP(hostname) {
   const cached = DNS_CACHE.get(hostname);
   if (cached && Date.now() < cached.expiry) return cached.ip;
 
+  let dns;
+  let promisify;
   try {
-    const dns = await import("dns");
-    const { promisify } = await import("util");
-    const resolver = new dns.Resolver();
-    resolver.setServers(GOOGLE_DNS_SERVERS);
-    const resolve4 = promisify(resolver.resolve4.bind(resolver));
-    const addresses = await resolve4(hostname);
-    DNS_CACHE.set(hostname, { ip: addresses[0], expiry: Date.now() + MEMORY_CONFIG.dnsCacheTtlMs });
-    return addresses[0];
+    dns = await import("dns");
+    ({ promisify } = await import("util"));
   } catch (error) {
     console.warn(`[ProxyFetch] DNS resolve failed for ${hostname}:`, error.message);
     return null;
   }
+
+  const attempts = [
+    // 1. Explicit servers — immune to /etc/hosts, which is the point of the bypass.
+    async () => {
+      const resolver = new dns.Resolver();
+      resolver.setServers(configuredDnsServers());
+      return promisify(resolver.resolve4.bind(resolver))(hostname);
+    },
+    // 2. System resolver — last resort when egress to public DNS is firewalled.
+    //    dns.resolve4() queries the configured nameservers and does not read
+    //    /etc/hosts itself, but a stub resolver (systemd-resolved) DOES
+    //    synthesize those entries, so a loopback answer is the MITM spoof
+    //    leaking back in. Refuse it and keep the bypass honest.
+    async () => promisify(dns.resolve4)(hostname),
+  ];
+
+  let lastError = null;
+  for (const attempt of attempts) {
+    try {
+      const addresses = await attempt();
+      const ip = addresses?.[0];
+      if (!ip) continue;
+      if (isLoopbackAddress(ip)) {
+        lastError = new Error(`refusing loopback answer ${ip} for ${hostname} (MITM spoof)`);
+        continue;
+      }
+      DNS_CACHE.set(hostname, { ip, expiry: Date.now() + MEMORY_CONFIG.dnsCacheTtlMs });
+      return ip;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  console.warn(`[ProxyFetch] DNS resolve failed for ${hostname}:`, lastError?.message);
+  return null;
 }
 
 /**
@@ -233,6 +275,88 @@ function shouldBypassMitmDns(url) {
     const hostname = new URL(url).hostname;
     return MITM_BYPASS_HOSTS.some(host => hostname.includes(host));
   } catch { return false; }
+}
+
+// ─── Fail-closed egress policy ──────────────────────────────────────────────
+// strictProxy is a PER-POOL flag (see connectionProxy.js), so it only reaches
+// proxyAwareFetch when a pool actually resolved. A connection with NO pool
+// assigned lands on `source: "none"`, which carries no strictProxy at all —
+// it egressed direct, from the host's own IP, which is precisely what the
+// relay pool exists to prevent. Measured 2026-09-18 on llm.barroso.tec.br:
+// 845 kiro routings, 146 with a pool; the rest went direct, died at the host
+// firewall, and surfaced to the client as a bare "fetch failed".
+//
+// KROUTER_REQUIRE_PROXY=1 makes the application agree with a fail-closed host
+// firewall: no proxy resolved + public destination = refuse, naming the host
+// instead of leaking a generic network error. Off by default, so deployments
+// without such a firewall keep the permissive behaviour.
+function requireProxyForEgress() {
+  const raw = normalizeString(process.env.KROUTER_REQUIRE_PROXY).toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
+function stripBrackets(host) {
+  return normalizeString(host).replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+}
+
+function isLoopbackAddress(host) {
+  const h = stripBrackets(host);
+  return h === "localhost" || h === "::1" || h === "0.0.0.0" || /^127\./.test(h);
+}
+
+// Destinations that never cross the public internet, so they are not "egress"
+// and must stay reachable without a proxy: loopback sidecars, the dashboard's
+// own calls, tailnet peers, and the relays themselves (100.64.0.0/10).
+const PRIVATE_HOST_SUFFIXES = [".local", ".internal", ".localdomain", ".ts.net"];
+
+function isPrivateEgressTarget(hostname) {
+  const h = stripBrackets(hostname);
+  if (!h) return false;
+  if (isLoopbackAddress(h)) return true;
+  if (PRIVATE_HOST_SUFFIXES.some((suffix) => h.endsWith(suffix))) return true;
+  // A bare label (no dot) is a container/service name, never a public host.
+  if (!h.includes(".") && !h.includes(":")) return true;
+
+  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const a = Number(v4[1]);
+    const b = Number(v4[2]);
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT / Tailscale
+    if (a === 169 && b === 254) return true;           // link-local / cloud metadata
+    return false;
+  }
+
+  // IPv6 unique-local (fc00::/7) and link-local (fe80::/10)
+  if (/^f[cd]/.test(h) || h.startsWith("fe80:")) return true;
+  return false;
+}
+
+// Called immediately before every path that would leave this process without a
+// proxy. Throws with an actionable message instead of letting the request die
+// as an anonymous network error three layers up.
+function assertDirectEgressAllowed(targetUrl, proxyOptions) {
+  const strict = proxyOptions?.strictProxy === true;
+  if (!strict && !requireProxyForEgress()) return;
+
+  let hostname;
+  try {
+    hostname = new URL(targetUrl).hostname;
+  } catch {
+    return; // Unparseable target: leave it to the fetch layer to reject.
+  }
+  if (isPrivateEgressTarget(hostname)) return;
+
+  const cause = strict
+    ? "the resolved proxy pool is strictProxy=true but no proxy URL survived resolution"
+    : "no proxy pool is assigned to this connection and KROUTER_REQUIRE_PROXY is on";
+  throw new Error(
+    `[ProxyFetch] Direct egress to ${hostname} refused: ${cause}. ` +
+    `Assign a proxy pool to this connection (dashboard → Connections), ` +
+    `or clear KROUTER_REQUIRE_PROXY to permit direct egress.`
+  );
 }
 
 function shouldBypassByNoProxy(targetUrl, noProxyValue) {
@@ -396,6 +520,11 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   const envProxyUrl = connectionProxyUrl ? null : normalizeProxyUrl(getEnvProxyUrl(targetUrl));
   const proxyUrl = connectionProxyUrl || envProxyUrl;
 
+  // Egress point 1 of 3: nothing resolved, so both the MITM manual-resolve
+  // below and the native fetch at the bottom would go direct. Refuse here so
+  // the bypass never even attempts a DNS lookup it has no use for.
+  if (!proxyUrl) assertDirectEgressAllowed(targetUrl, proxyOptions);
+
   // MITM DNS bypass: for known MITM-intercepted hosts, resolve real IP to avoid DNS spoof
   if (shouldBypassMitmDns(targetUrl)) {
     if (proxyUrl) {
@@ -410,6 +539,9 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
           }
           throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
         }
+        // Egress point 2 of 3: the proxy existed and failed, and strictProxy is
+        // off — the manual-resolve bypass below would leave direct.
+        assertDirectEgressAllowed(targetUrl, proxyOptions);
         console.warn(`[ProxyFetch] Proxy failed, falling back to direct bypass: ${proxyError.message}`);
       }
     }
@@ -435,6 +567,8 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
         }
         throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
       }
+      // Egress point 3 of 3: non-strict fallback to a direct connection.
+      assertDirectEgressAllowed(targetUrl, proxyOptions);
       console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${proxyError.message}`);
       return originalFetch(url, options);
     }
