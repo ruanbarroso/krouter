@@ -1,6 +1,6 @@
 import { HTTP_STATUS, RETRY_CONFIG, DEFAULT_RETRY_CONFIG, resolveRetryEntry, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { shouldRefreshCredentials } from "../services/oauthCredentialManager.js";
-import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { proxyAwareFetch, newUpstreamHeadersTimeoutError } from "../utils/proxyFetch.js";
 import { parseRetryAfterHeaders } from "../utils/retryHeaders.js";
 import { dbg } from "../utils/debugLog.js";
 import {
@@ -243,10 +243,12 @@ export class BaseExecutor {
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
-      // Abort if upstream doesn't return response headers within connection timeout
+      // Abort if upstream doesn't return response headers within connection timeout.
+      // O motivo carrega código próprio para o proxyAwareFetch não confundir
+      // upstream lento com proxy quebrado (ver UPSTREAM_HEADERS_TIMEOUT_CODE).
       const connectCtrl = new AbortController();
       const timeoutMs = this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS;
-      const connectTimer = setTimeout(() => connectCtrl.abort(new Error("fetch connect timeout")), timeoutMs);
+      const connectTimer = setTimeout(() => connectCtrl.abort(newUpstreamHeadersTimeoutError()), timeoutMs);
       const mergedSignal = signal ? AbortSignal.any([signal, connectCtrl.signal]) : connectCtrl.signal;
 
       try {
