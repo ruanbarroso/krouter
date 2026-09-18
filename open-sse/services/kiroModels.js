@@ -273,14 +273,22 @@ export async function resolveKiroModels(credentials, options = {}) {
     }
   }
 
-  const proxyOptions = await proxyOptionsFor(credentials, options.log);
+  // Honour a pool the caller already resolved (qoderModels uses the same
+  // options.proxyOptions contract, and the dashboard catalog routes pass one);
+  // otherwise resolve it ourselves from the connection.
+  const proxyOptions = options.proxyOptions || (await proxyOptionsFor(credentials, options.log));
 
   let raw;
   try {
     raw = await fetchKiroCatalogRaw(credentials, options.signal, proxyOptions);
   } catch (err) {
-    if (err && err.status === 401 && credentials.refreshToken) {
-      options.log?.info?.("KIRO_MODELS", "Got 401 from Kiro; refreshing token");
+    // AWS answers 403 "The bearer token included in the request is invalid"
+    // here, not 401 — testing only for 401 meant an expired token never
+    // triggered the refresh and the catalog fell back to the hardcoded list
+    // without saying why (seen on llm.barroso.tec.br once the egress was fixed
+    // and the network noise stopped hiding it).
+    if (err && (err.status === 401 || err.status === 403) && credentials.refreshToken) {
+      options.log?.info?.("KIRO_MODELS", `Got ${err.status} from Kiro; refreshing token`);
       const refreshed = await refreshKiroToken(
         credentials.refreshToken,
         credentials.providerSpecificData,
