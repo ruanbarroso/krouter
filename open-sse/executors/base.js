@@ -191,11 +191,12 @@ export class BaseExecutor {
       return true;
     };
 
-    // Provider-level circuit breaker (0.5.30): abort before making any request
-    // if this entire provider is known to be down (e.g. 10 consecutive 500s).
-    if (isCircuitBreakerOpen(this.provider)) {
+    // Disjuntor por provider OU por (provider, modelo): google e opencode
+    // tripam por modelo (ver MODEL_SCOPED_PROVIDERS em circuitBreaker.js) —
+    // derrubar o provider inteiro por um modelo só queimava os sadios junto.
+    if (isCircuitBreakerOpen(this.provider, model)) {
       log?.warn?.("BREAKER", `${this.provider} circuit breaker OPEN — skipping request`);
-      throw new Error(`Circuit breaker open for provider: ${this.provider}`);
+      throw new Error(`Circuit breaker open for provider: ${this.provider}${model ? ` model=${model}` : ""}`);
     }
 
     for (let urlIndex = 0; urlIndex < fallbackCount; urlIndex++) {
@@ -276,12 +277,13 @@ export class BaseExecutor {
           }
         }
 
-        // Circuit breaker health tracking (0.5.30)
+        // Circuit breaker health tracking (0.5.30; escopo por modelo em
+        // google/opencode desde 2026-09-18 — o `model` viaja junto).
         if (response.status >= 200 && response.status < 500 && response.status !== 429) {
           // 429 is a rate limit, not a provider outage. 400 is user error.
-          recordProviderSuccess(this.provider);
+          recordProviderSuccess(this.provider, model);
         } else if (response.status >= 500) {
-          const tripped = recordProviderFailure(this.provider, response.status);
+          const tripped = recordProviderFailure(this.provider, response.status, model);
           if (tripped) log?.warn?.("BREAKER", `${this.provider} circuit breaker TRIPPED (too many 5xx errors)`);
         }
 
