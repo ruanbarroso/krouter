@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { FILTERS } from "./filters.js";
+import { resolveCatalogEgress, catalogFetch } from "@/lib/network/catalogEgress.js";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +8,7 @@ export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const url = searchParams.get("url");
   const type = searchParams.get("type");
+  const provider = searchParams.get("provider");
 
   if (!url || !type) {
     return NextResponse.json({ error: "Missing url or type" }, { status: 400 });
@@ -18,7 +20,12 @@ export async function GET(request) {
   }
 
   try {
-    const res = await fetch(url);
+    // When the dashboard names the provider, the catalog fetch follows the
+    // provider's egress pool (providerStrategies.<provider>.proxyPoolId) so it
+    // works on hosts with fail-closed outbound firewalls. Without the param
+    // the fetch stays direct, exactly as before.
+    const proxyOptions = provider ? await resolveCatalogEgress(provider) : null;
+    const res = await catalogFetch(url, {}, proxyOptions);
     if (!res.ok) {
       return NextResponse.json({ data: [] });
     }

@@ -4,6 +4,7 @@ import { getProviderConnections } from "@/lib/localDb";
 import { FILTERS } from "@/app/api/providers/suggested-models/filters";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
+import { resolveCatalogEgress, catalogFetch } from "@/lib/network/catalogEgress.js";
 
 export const dynamic = "force-dynamic";
 
@@ -33,22 +34,22 @@ function setCached(key, data) {
   cache.set(key, { data, expiresAt: Date.now() + CACHE_TTL_MS });
 }
 
-async function fetchWithTimeout(url, options = {}) {
+async function fetchWithTimeout(url, options = {}, proxyOptions = null) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...options, signal: ctrl.signal });
+    return await catalogFetch(url, { ...options, signal: ctrl.signal }, proxyOptions);
   } finally {
     clearTimeout(timer);
   }
 }
 
 // Free / public provider — pull from modelsFetcher.url, parse via FILTERS.
-async function fetchFromPublicFetcher(providerInfo) {
+async function fetchFromPublicFetcher(providerInfo, proxyOptions = null) {
   const fetcher = providerInfo?.modelsFetcher;
   if (!fetcher?.url || !fetcher?.type) return { models: [], source: "no-fetcher" };
 
-  const res = await fetchWithTimeout(fetcher.url);
+  const res = await fetchWithTimeout(fetcher.url, {}, proxyOptions);
   if (!res.ok) return { models: [], source: "fetcher", error: `Provider returned HTTP ${res.status}` };
 
   const json = await res.json();
@@ -68,7 +69,7 @@ async function fetchFromPublicFetcher(providerInfo) {
 
 // OAuth provider — use the credential to fetch live model list (e.g. Kiro
 // returns a per-account set including -thinking/-agentic variants).
-async function fetchFromCredentialedResolver(providerId, connection) {
+async function fetchFromCredentialedResolver(providerId, connection, proxyOptions = null) {
   const resolvers = {
     kiro: async (conn) => {
       const result = await resolveKiroModels({
@@ -87,7 +88,7 @@ async function fetchFromCredentialedResolver(providerId, connection) {
         email: conn.email,
         displayName: conn.displayName,
         providerSpecificData: conn.providerSpecificData || {}
-      });
+      }, { proxyOptions });
       return result?.models?.length
         ? { models: result.models.map(m => ({ id: m.id, name: m.name || m.id })) }
         : null;
@@ -102,7 +103,7 @@ async function fetchFromCredentialedResolver(providerId, connection) {
 
 // API-key OpenAI-compatible provider — best-effort hit of <baseUrl>/models with
 // the user's key. Many providers expose this; we degrade silently if not.
-async function fetchFromApiKeyEndpoint(providerInfo, connection) {
+async function fetchFromApiKeyEndpoint(providerInfo, connection, proxyOptions = null) {
   if (!connection?.apiKey) return null;
   const baseUrl = connection?.providerSpecificData?.baseUrl
     || providerInfo?.notice?.baseUrl
@@ -116,7 +117,7 @@ async function fetchFromApiKeyEndpoint(providerInfo, connection) {
   try {
     const res = await fetchWithTimeout(modelsUrl, {
       headers: { "Authorization": `Bearer ${connection.apiKey}` }
-    });
+    }, proxyOptions);
     if (!res.ok) return null;
     const json = await res.json();
     const list = json?.data || json?.models || [];
@@ -170,19 +171,27 @@ export async function GET(request) {
       connection = conns.find(c => c.id === connectionId) || null;
     }
 
+    // Catalog fetches follow the same egress as serving traffic (per-connection
+    // pool, then providerStrategies.<provider>.proxyPoolId, then direct) so
+    // the live catalog works on hosts with fail-closed outbound firewalls.
+    const proxyOptions = await resolveCatalogEgress(
+      providerId,
+      connection?.providerSpecificData || null
+    );
+
     // Strategy fallback chain — first one that returns models wins.
     let result = null;
 
     // 1) Public fetcher (works for any provider with modelsFetcher; cheapest)
     if (providerInfo.modelsFetcher) {
-      try { result = await fetchFromPublicFetcher(providerInfo); }
+      try { result = await fetchFromPublicFetcher(providerInfo, proxyOptions); }
       catch (e) { result = { models: [], source: "fetcher", error: e.message }; }
     }
 
     // 2) Credentialed resolver (OAuth providers like kiro/qoder)
     if ((!result || !result.models?.length) && connection) {
       try {
-        const resolved = await fetchFromCredentialedResolver(providerId, connection);
+        const resolved = await fetchFromCredentialedResolver(providerId, connection, proxyOptions);
         if (resolved) result = resolved;
       } catch (e) {
         if (!result) result = { models: [], source: "resolver", error: e.message };
@@ -192,7 +201,7 @@ export async function GET(request) {
     // 3) API-key /models endpoint (last resort for API-key providers)
     if ((!result || !result.models?.length) && connection?.apiKey) {
       try {
-        const apiResult = await fetchFromApiKeyEndpoint(providerInfo, connection);
+        const apiResult = await fetchFromApiKeyEndpoint(providerInfo, connection, proxyOptions);
         if (apiResult) result = apiResult;
       } catch (e) {
         if (!result) result = { models: [], source: "apikey", error: e.message };

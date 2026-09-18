@@ -7,6 +7,7 @@ import { refreshGoogleToken, updateProviderCredentials } from "@/sse/services/to
 import { resolveOllamaLocalHost } from "open-sse/config/providers.js";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
+import { resolveCatalogEgress, catalogFetch } from "@/lib/network/catalogEgress.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -138,15 +139,19 @@ const resolveQwenModelsUrl = (connection) => {
 };
 
 // Generic custom resolver for OAuth providers that need refresh-on-401 + token persist.
-// Receives a `fetchFn(token)` and returns parsed models or throws.
-const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => async (connection) => {
+// Receives a `fetchFn(token, connection, egressFetch)` and returns parsed models or throws.
+const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => async (connection, proxyOptions = null) => {
   const { accessToken, refreshToken } = connection;
   if (!accessToken) {
     return { error: "No valid token found", status: 401 };
   }
+  // Egress-aware fetch so catalog calls follow the provider's proxy pool on
+  // hosts with fail-closed outbound firewalls. fetchFn implementations that
+  // ignore the third argument keep the previous direct behavior.
+  const egressFetch = (url, options) => catalogFetch(url, options, proxyOptions);
   let warning;
   try {
-    let response = await fetchFn(accessToken, connection);
+    let response = await fetchFn(accessToken, connection, egressFetch);
     if (!response.ok && (response.status === 401 || response.status === 403) && refreshToken) {
       const refreshed = await refreshFn(connection);
       if (refreshed?.accessToken) {
@@ -157,7 +162,7 @@ const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => asyn
         });
         connection.accessToken = refreshed.accessToken;
         if (refreshed.refreshToken) connection.refreshToken = refreshed.refreshToken;
-        response = await fetchFn(refreshed.accessToken, connection);
+        response = await fetchFn(refreshed.accessToken, connection, egressFetch);
       }
     }
     if (response.ok) {
@@ -220,12 +225,12 @@ const PROVIDER_MODELS_CONFIG = {
     // `{project: <projectId>}` in the body PLUS the Antigravity client headers,
     // otherwise it returns 403 PERMISSION_DENIED. 0.5.45 sent {} and missing
     // headers, producing the 403 flood the user reported.
-    customResolver: async (connection) => {
+    customResolver: async (connection, proxyOptions = null) => {
       const accessToken = connection?.accessToken;
       if (!accessToken) return { error: "No access token", status: 401 };
       const projectId = connection?.projectId || connection?.providerSpecificData?.projectId;
       try {
-        const res = await fetch("https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", {
+        const res = await catalogFetch("https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", {
           method: "POST",
           headers: {
             "Authorization": `Bearer ${accessToken}`,
@@ -236,7 +241,7 @@ const PROVIDER_MODELS_CONFIG = {
             "x-request-source": "local",
           },
           body: JSON.stringify(projectId ? { project: projectId } : {}),
-        });
+        }, proxyOptions);
         if (!res.ok) {
           const errBody = await res.text().catch(() => "");
           return { error: `Failed to fetch models: ${res.status} ${errBody.slice(0, 100)}`, status: res.status };
@@ -284,7 +289,7 @@ const PROVIDER_MODELS_CONFIG = {
   "cloudflare-ai": {
     // 0.5.80 — Cloudflare Workers AI dynamic model fetching.
     // Cloudflare requires the account ID in the URL to list available models.
-    customResolver: async (connection) => {
+    customResolver: async (connection, proxyOptions = null) => {
       const accessToken = connection?.accessToken || connection?.apiKey;
       if (!accessToken) return { error: "No access token", status: 401 };
 
@@ -292,14 +297,14 @@ const PROVIDER_MODELS_CONFIG = {
       if (!accountId) return { error: "Missing Cloudflare Account ID", status: 400 };
 
       try {
-        const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/models/search`, {
+        const res = await catalogFetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/models/search`, {
           method: "GET",
           headers: {
             "Authorization": `Bearer ${accessToken}`,
             "Content-Type": "application/json",
             "x-request-source": "local",
           },
-        });
+        }, proxyOptions);
 
         if (!res.ok) {
           const errBody = await res.text().catch(() => "");
@@ -470,7 +475,7 @@ const PROVIDER_MODELS_CONFIG = {
     }
   },
   qoder: {
-    customResolver: async (connection) => {
+    customResolver: async (connection, proxyOptions = null) => {
       const credentials = {
         accessToken: connection.accessToken,
         refreshToken: connection.refreshToken,
@@ -480,7 +485,7 @@ const PROVIDER_MODELS_CONFIG = {
       };
       let warning;
       try {
-        const result = await resolveQoderModels(credentials, { forceRefresh: true });
+        const result = await resolveQoderModels(credentials, { forceRefresh: true, proxyOptions });
         if (result?.models?.length) {
           return {
             models: result.models.map((m) => ({
@@ -507,10 +512,10 @@ const PROVIDER_MODELS_CONFIG = {
   "gemini-cli": {
     customResolver: buildOAuthResolver({
       refreshFn: (conn) => refreshGoogleToken(conn.refreshToken, GEMINI_CONFIG.clientId, GEMINI_CONFIG.clientSecret),
-      fetchFn: (token, conn) => {
+      fetchFn: (token, conn, egressFetch) => {
         const projectId = conn.projectId || conn.providerSpecificData?.projectId;
         const body = projectId ? { project: projectId } : {};
-        return fetch(GEMINI_CLI_MODELS_URL, {
+        return (egressFetch || fetch)(GEMINI_CLI_MODELS_URL, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -565,6 +570,11 @@ export async function GET(request, { params }) {
 
     const effectiveProvider = providerId || connection.provider;
 
+    // Catalog fetches follow the same egress as serving traffic (per-connection
+    // pool, then providerStrategies.<provider>.proxyPoolId, then direct) so
+    // the live catalog works on hosts with fail-closed outbound firewalls.
+    const proxyOptions = await resolveCatalogEgress(effectiveProvider, connection?.providerSpecificData || null);
+
     if (isOpenAICompatibleProvider(effectiveProvider)) {
       const baseUrl = connection?.providerSpecificData?.baseUrl;
       if (!baseUrl) {
@@ -573,13 +583,13 @@ export async function GET(request, { params }) {
       try { assertSafeBaseUrl(baseUrl); }
       catch (e) { return NextResponse.json({ error: e.message }, { status: 400 }); }
       const url = `${baseUrl.replace(/\/$/, "")}/models`;
-      const response = await fetch(url, {
+      const response = await catalogFetch(url, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${connection.apiKey}`,
         },
-      });
+      }, proxyOptions);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -614,7 +624,7 @@ export async function GET(request, { params }) {
       }
 
       const url = `${baseUrl}/models`;
-      const response = await fetch(url, {
+      const response = await catalogFetch(url, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
@@ -622,7 +632,7 @@ export async function GET(request, { params }) {
           "anthropic-version": "2023-06-01",
           "Authorization": `Bearer ${connection?.apiKey || ""}`
         },
-      });
+      }, proxyOptions);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -653,7 +663,7 @@ export async function GET(request, { params }) {
 
     // Config-driven custom resolver path (OAuth refresh, non-OpenAI shape, etc.)
     if (typeof config.customResolver === "function") {
-      const result = await config.customResolver(connection);
+      const result = await config.customResolver(connection, proxyOptions);
       if (result.error) {
         return NextResponse.json({ error: result.error }, { status: result.status || 500 });
       }
@@ -725,7 +735,7 @@ export async function GET(request, { params }) {
       fetchOptions.body = JSON.stringify(config.body);
     }
 
-    const response = await fetch(url, fetchOptions);
+    const response = await catalogFetch(url, fetchOptions, proxyOptions);
 
     if (!response.ok) {
       const errorText = await response.text();
