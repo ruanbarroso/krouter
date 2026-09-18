@@ -39,6 +39,27 @@ export function selectAnthropicBeta(model = "") {
   return flags.join(",");
 }
 
+// Parse a raw `anthropic-beta` header value into a clean flag list.
+export function parseBetaFlags(value = "") {
+  if (typeof value !== "string") return [];
+  return value.split(",").map(s => s.trim()).filter(Boolean);
+}
+
+// Union the gateway's static beta list with flags the client actually sent
+// (e.g. advisor-tool-2026-03-01 from newer Claude Code). Static flags keep
+// their positions; client-only flags are appended in arrival order. Without
+// this, any client-sent experimental tool (advisor, …) is rejected upstream
+// with 400 "Input tag … does not match any of the expected tags" because the
+// enabling beta never reaches Anthropic.
+export function mergeAnthropicBetas(base = "", extra = []) {
+  const merged = parseBetaFlags(base);
+  for (const flag of extra || []) {
+    const f = String(flag || "").trim();
+    if (f && !merged.includes(f)) merged.push(f);
+  }
+  return merged.join(",");
+}
+
 // Shared Claude-compatible API headers (reused across claude-format providers)
 // 6acc3bb9 — lowercase `anthropic-version` so a client-forwarded lowercase copy on
 // /v1/messages doesn't duplicate against a Title-Case key.

@@ -124,7 +124,7 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, clientBetaFlags = [] }) {
     const fallbackCount = this.getFallbackCount();
     let lastError = null;
     let lastStatus = 0;
@@ -227,7 +227,9 @@ export class BaseExecutor {
       // 0.5.123 (upstream 13ed1456) — thread model so the claude executor can pick
       // anthropic-beta per model. Only DefaultExecutor reads the extra args; executors
       // with their own execute() (antigravity) or explicit super calls are unaffected.
-      const headers = this.buildHeaders(effectiveCredentials, stream, url, model);
+      // clientBetaFlags carries the inbound client's anthropic-beta flags so the
+      // claude executor can merge them upstream (advisor-tool-2026-03-01, …).
+      const headers = this.buildHeaders(effectiveCredentials, stream, url, model, { clientBetaFlags });
 
       // 0.5.74 — Force MITM anti-loop header on ALL outbound requests,
       // regardless of whether child executors override buildHeaders() and

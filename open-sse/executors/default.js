@@ -1,5 +1,5 @@
 import { BaseExecutor } from "./base.js";
-import { PROVIDERS, selectAnthropicBeta } from "../config/providers.js";
+import { PROVIDERS, selectAnthropicBeta, mergeAnthropicBetas } from "../config/providers.js";
 import { OAUTH_ENDPOINTS, buildKimiHeaders } from "../config/appConstants.js";
 import { buildClineHeaders } from "../../src/shared/utils/clineAuth.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
@@ -89,8 +89,12 @@ export class DefaultExecutor extends BaseExecutor {
     }
   }
 
-  buildHeaders(credentials, stream = true, url = null, model = null) {
+  buildHeaders(credentials, stream = true, url = null, model = null, extra = {}) {
     const headers = { "Content-Type": "application/json", ...this.config.headers };
+    // Beta flags the calling client sent (e.g. advisor-tool-2026-03-01 from
+    // newer Claude Code). Merged into the upstream Anthropic-Beta below so
+    // client-requested experimental tools keep working through the gateway.
+    const clientBetaFlags = Array.isArray(extra?.clientBetaFlags) ? extra.clientBetaFlags : [];
 
     switch (this.provider) {
       case "gemini":
@@ -105,7 +109,7 @@ export class DefaultExecutor extends BaseExecutor {
         // CLI fingerprint (config.headers = CLAUDE_CLI_SPOOF_HEADERS) and compute
         // anthropic-beta per-request from the model so heavy-agent flags only ship
         // for opus/sonnet.
-        if (model) headers["Anthropic-Beta"] = selectAnthropicBeta(model);
+        if (model) headers["Anthropic-Beta"] = mergeAnthropicBetas(selectAnthropicBeta(model), clientBetaFlags);
         credentials.apiKey
           ? (headers["x-api-key"] = credentials.apiKey)
           : (headers["Authorization"] = `Bearer ${credentials.accessToken}`);
@@ -140,7 +144,7 @@ export class DefaultExecutor extends BaseExecutor {
           // are untouched. The strip block below still trims claude-code-20250219 for
           // a non-official upstream.
           if (typeof model === "string" && /^claude-/.test(model)) {
-            headers["Anthropic-Beta"] = selectAnthropicBeta(model);
+            headers["Anthropic-Beta"] = mergeAnthropicBetas(selectAnthropicBeta(model), clientBetaFlags);
           }
         } else if (this.provider === "gitlab") {
           // GitLab Duo uses Bearer token (PAT with ai_features scope, or OAuth access token)

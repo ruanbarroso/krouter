@@ -24,6 +24,7 @@ import { handleForcedSSEToJson } from "./chatCore/sseToJsonHandler.js";
 import { handleNonStreamingResponse } from "./chatCore/nonStreamingHandler.js";
 import { handleStreamingResponse, buildOnStreamComplete } from "./chatCore/streamingHandler.js";
 import { detectClientTool, isNativePassthrough } from "../utils/clientDetector.js";
+import { parseBetaFlags } from "../config/providers.js";
 import { dedupeTools } from "../utils/toolDeduper.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
@@ -107,6 +108,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Only force non-streaming when client didn't explicitly request it.
   const detectedTool = detectClientTool(clientRawRequest?.headers || {}, body);
   if (detectedTool === "deepseek-tui" && body.stream !== true) stream = false;
+
+  // Client-sent anthropic-beta flags (e.g. advisor-tool-2026-03-01 from newer
+  // Claude Code). Threaded to the executor so the claude provider merges them
+  // into the upstream header — otherwise client-requested experimental tools
+  // 400 with "Input tag … does not match any of the expected tags".
+  const clientBetaFlags = parseBetaFlags(
+    clientRawRequest?.headers?.["anthropic-beta"] || clientRawRequest?.headers?.["Anthropic-Beta"] || ""
+  );
 
   // Check client Accept header preference for non-streaming requests
   // This fixes AI SDK compatibility where clients send Accept: application/json
@@ -443,7 +452,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   try {
-    const result = await executor.execute({ model, body: translatedBody, stream, credentials, clientTool, signal: streamController.signal, log, proxyOptions });
+    const result = await executor.execute({ model, body: translatedBody, stream, credentials, clientTool, signal: streamController.signal, log, proxyOptions, clientBetaFlags });
     providerResponse = result.response;
     providerUrl = result.url;
     providerHeaders = result.headers;
@@ -496,7 +505,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
           try { await onCredentialsRefreshed(newCredentials); } catch (e) { log?.warn?.("TOKEN", `onCredentialsRefreshed failed: ${e.message}`); }
         }
         try {
-          const retryResult = await executor.execute({ model, body: translatedBody, stream, credentials: updatedCredentials, clientTool, signal: streamController.signal, log, proxyOptions });
+          const retryResult = await executor.execute({ model, body: translatedBody, stream, credentials: updatedCredentials, clientTool, signal: streamController.signal, log, proxyOptions, clientBetaFlags });
           // Always adopt the retry result — even on non-ok. The retry's error is
           // the real reason the user's request failed; the original 401 body is
           // stale and was only ever a refresh trigger. Downstream parseUpstreamError
