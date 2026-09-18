@@ -45,6 +45,18 @@ async function fetchWithTimeout(url, init = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort("timeout"), FETCH_TIMEOUT_MS);
   try {
+    // Honor the ambient OAuth-connect proxy (see ../proxyContext.js) so the
+    // device-token poll and userinfo fetch egress like the rest of the
+    // dashboard OAuth flow instead of always going direct.
+    const { getOAuthProxyOptions } = await import("../proxyContext.js");
+    const proxyOptions = getOAuthProxyOptions();
+    if (
+      proxyOptions &&
+      (proxyOptions.vercelRelayUrl || proxyOptions.url || proxyOptions.connectionProxyUrl)
+    ) {
+      const { proxyAwareFetch } = await import("open-sse/utils/proxyFetch.js");
+      return await proxyAwareFetch(url, { ...init, signal: controller.signal }, proxyOptions);
+    }
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);

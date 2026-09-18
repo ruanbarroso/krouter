@@ -15,9 +15,57 @@ import crypto from "crypto";
 // The MITM server's first dispatch step is "if x-request-source: local →
 // passthrough to real upstream", so this header makes our own OAuth calls
 // transparent to MITM.
-function oauthFetch(url, options = {}) {
+//
+// proxyOptions (optional) carries the provider's proxy-pool resolution — the
+// shape returned by resolveConnectionProxyConfig() — so the OAuth connect
+// flow honors the same egress path as inference instead of always going
+// direct. Without it (or with no pool configured) behavior is unchanged.
+function hasOAuthProxy(proxyOptions) {
+  if (!proxyOptions || typeof proxyOptions !== "object") return false;
+  return Boolean(
+    proxyOptions.vercelRelayUrl ||
+    proxyOptions.url ||
+    proxyOptions.connectionProxyUrl
+  );
+}
+
+async function oauthFetch(url, options = {}, proxyOptions = null) {
   const headers = { ...(options.headers || {}), "x-request-source": "local" };
+  // Explicit argument wins; otherwise use the ambient connect-flow proxy
+  // (runWithOAuthProxy), so provider implementations need no signature change.
+  const effective = proxyOptions ?? getOAuthProxyOptions();
+  if (hasOAuthProxy(effective)) {
+    // Dynamic import: proxyFetch only pulls runtimeConfig/debugLog, and this
+    // keeps the web-route bundle free of a static edge back into open-sse.
+    const { proxyAwareFetch } = await import("open-sse/utils/proxyFetch.js");
+    return proxyAwareFetch(url, { ...options, headers }, effective);
+  }
   return fetch(url, { ...options, headers });
+}
+
+/**
+ * Resolve the egress proxy for a provider's OAuth connect flow from the
+ * provider strategy settings (same source the dashboard's ConnectionsCard
+ * writes). Returns the resolveConnectionProxyConfig() shape, or null when
+ * the provider has no pool configured — meaning "direct, as before".
+ */
+export async function resolveOAuthProxyOptions(providerName) {
+  try {
+    if (!providerName) return null;
+    const { getSettings } = await import("@/lib/localDb");
+    const settings = await getSettings();
+    const poolIdRaw = (settings?.providerStrategies || {})[providerName]?.proxyPoolId;
+    const poolId = typeof poolIdRaw === "string" ? poolIdRaw.trim() : "";
+    if (!poolId) return null;
+    const { resolveConnectionProxyConfig } = await import("@/lib/network/connectionProxy");
+    const resolved = await resolveConnectionProxyConfig({ proxyPoolId: poolId });
+    if (!resolved || (!resolved.connectionProxyUrl && !resolved.vercelRelayUrl)) return null;
+    return resolved;
+  } catch {
+    // Proxy resolution must never break the connect flow — worst case the
+    // exchange goes direct, exactly like before this change.
+    return null;
+  }
 }
 
 import { generatePKCE, generateState } from "./utils/pkce";
@@ -45,6 +93,7 @@ import {
 } from "./constants/oauth";
 import { XAI_CONFIG, XAI_PKCE_VERIFIER_BYTES } from "./constants/xai";
 import { GROK_CLI_USER_AGENT } from "open-sse/config/grokCli.js";
+import { getOAuthProxyOptions, runWithOAuthProxy } from "./proxyContext.js";
 
 // Inlined from services/xai.js to keep web route bundle free of `open` (CLI-only) package
 let cachedXaiDiscovery = null;
@@ -64,10 +113,10 @@ function validateXaiOAuthEndpoint(rawUrl, field) {
   return value;
 }
 
-async function discoverXaiEndpoints() {
+async function discoverXaiEndpoints(proxyOptions = null) {
   if (cachedXaiDiscovery) return cachedXaiDiscovery;
   try {
-    const res = await fetch(XAI_CONFIG.discoveryUrl, { headers: { Accept: "application/json" } });
+    const res = await oauthFetch(XAI_CONFIG.discoveryUrl, { headers: { Accept: "application/json" } }, proxyOptions);
     if (res.ok) {
       const data = await res.json();
       cachedXaiDiscovery = {
@@ -124,10 +173,10 @@ function extractEmailFromAccessToken(accessToken) {
 }
 
 // Resolve Kiro profileArn via CodeWhisperer (IDC/Builder-ID tokens omit it, causing 403)
-export async function fetchKiroProfileArn(accessToken) {
+export async function fetchKiroProfileArn(accessToken, proxyOptions = null) {
   if (!accessToken) return null;
   try {
-    const response = await fetch("https://codewhisperer.us-east-1.amazonaws.com/ListAvailableProfiles", {
+    const response = await oauthFetch("https://codewhisperer.us-east-1.amazonaws.com/ListAvailableProfiles", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -135,7 +184,7 @@ export async function fetchKiroProfileArn(accessToken) {
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify({ maxResults: 10 }),
-    });
+    }, proxyOptions);
     if (!response.ok) return null;
     const data = await response.json();
     return data.profiles?.find((p) => p.arn?.trim())?.arn?.trim() || null;
@@ -179,7 +228,7 @@ function createClineOAuthFlow(config, label) {
       });
       return `${cfg.authorizeUrl}?${params.toString()}`;
     },
-    exchangeToken: async (cfg, code, redirectUri) => {
+    exchangeToken: async (cfg, code, redirectUri, codeVerifier, state, meta, proxyOptions = null) => {
       try {
         // Cline encodes token data as base64 in the code param.
         let base64 = code;
@@ -198,11 +247,11 @@ function createClineOAuthFlow(config, label) {
           expires_at: tokenData.expiresAt,
         };
       } catch {
-        const response = await fetch(cfg.tokenExchangeUrl, {
+        const response = await oauthFetch(cfg.tokenExchangeUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json", Accept: "application/json" },
           body: JSON.stringify({ grant_type: "authorization_code", code, client_type: "extension", redirect_uri: redirectUri }),
-        });
+        }, proxyOptions);
         if (!response.ok) {
           const error = await response.text();
           throw new Error(`${label} token exchange failed: ${error}`);
@@ -463,7 +512,7 @@ const PROVIDERS = {
     },
     postExchange: async (tokens) => {
       // Fetch user info
-      const userInfoRes = await fetch(`${GEMINI_CONFIG.userInfoUrl}?alt=json`, {
+      const userInfoRes = await oauthFetch(`${GEMINI_CONFIG.userInfoUrl}?alt=json`, {
         headers: { Authorization: `Bearer ${tokens.access_token}` },
       });
       const userInfo = userInfoRes.ok ? await userInfoRes.json() : {};
@@ -471,7 +520,7 @@ const PROVIDERS = {
       // Fetch project ID
       let projectId = "";
       try {
-        const projectRes = await fetch(
+        const projectRes = await oauthFetch(
           "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
           {
             method: "POST",
@@ -556,7 +605,7 @@ const PROVIDERS = {
       const metadata = getOAuthClientMetadata();
 
       // Fetch user info
-      const userInfoRes = await fetch(`${ANTIGRAVITY_CONFIG.userInfoUrl}?alt=json`, {
+      const userInfoRes = await oauthFetch(`${ANTIGRAVITY_CONFIG.userInfoUrl}?alt=json`, {
         headers: {
           Authorization: `Bearer ${tokens.access_token}`,
           "x-request-source": "local",
@@ -568,7 +617,7 @@ const PROVIDERS = {
       let projectId = "";
       let tierId = "legacy-tier";
       try {
-        const loadRes = await fetch(ANTIGRAVITY_CONFIG.loadCodeAssistEndpoint, {
+        const loadRes = await oauthFetch(ANTIGRAVITY_CONFIG.loadCodeAssistEndpoint, {
           method: "POST",
           headers: loadHeaders,
           body: JSON.stringify({ metadata }),
@@ -594,7 +643,7 @@ const PROVIDERS = {
         const doOnboard = async () => {
           for (let i = 0; i < 10; i++) {
             try {
-              const onboardRes = await fetch(ANTIGRAVITY_CONFIG.onboardUserEndpoint, {
+              const onboardRes = await oauthFetch(ANTIGRAVITY_CONFIG.onboardUserEndpoint, {
                 method: "POST",
                 headers: loadHeaders,
                 body: JSON.stringify({ tierId, metadata }),
@@ -668,7 +717,7 @@ const PROVIDERS = {
     },
     postExchange: async (tokens) => {
       // Fetch user info (MUST succeed to get API key)
-      const userInfoRes = await fetch(
+      const userInfoRes = await oauthFetch(
         `${IFLOW_CONFIG.userInfoUrl}?accessToken=${encodeURIComponent(tokens.access_token)}`,
         {
           headers: {
@@ -815,7 +864,7 @@ const PROVIDERS = {
     config: QWEN_CONFIG,
     flowType: "device_code",
     requestDeviceCode: async (config, codeChallenge) => {
-      const response = await fetch(config.deviceCodeUrl, {
+      const response = await oauthFetch(config.deviceCodeUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
@@ -868,7 +917,7 @@ const PROVIDERS = {
     config: GITHUB_CONFIG,
     flowType: "device_code",
     requestDeviceCode: async (config) => {
-      const response = await fetch(config.deviceCodeUrl, {
+      const response = await oauthFetch(config.deviceCodeUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
@@ -918,7 +967,7 @@ const PROVIDERS = {
     },
     postExchange: async (tokens) => {
       // Get Copilot token using GitHub access token
-      const copilotRes = await fetch(GITHUB_CONFIG.copilotTokenUrl, {
+      const copilotRes = await oauthFetch(GITHUB_CONFIG.copilotTokenUrl, {
         headers: {
           Authorization: `Bearer ${tokens.access_token}`,
           Accept: "application/json",
@@ -929,7 +978,7 @@ const PROVIDERS = {
       const copilotToken = copilotRes.ok ? await copilotRes.json() : {};
 
       // Get user info from GitHub
-      const userRes = await fetch(GITHUB_CONFIG.userInfoUrl, {
+      const userRes = await oauthFetch(GITHUB_CONFIG.userInfoUrl, {
         headers: {
           Authorization: `Bearer ${tokens.access_token}`,
           Accept: "application/json",
@@ -971,7 +1020,7 @@ const PROVIDERS = {
       const deviceAuthUrl = `https://oidc.${region}.amazonaws.com/device_authorization`;
 
       // Step 1: Register client with AWS SSO OIDC
-      const registerRes = await fetch(registerClientUrl, {
+      const registerRes = await oauthFetch(registerClientUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -994,7 +1043,7 @@ const PROVIDERS = {
       const clientInfo = await registerRes.json();
 
       // Step 2: Request device authorization
-      const deviceRes = await fetch(deviceAuthUrl, {
+      const deviceRes = await oauthFetch(deviceAuthUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1123,7 +1172,7 @@ const PROVIDERS = {
     config: KIMI_CODING_CONFIG,
     flowType: "device_code",
     requestDeviceCode: async (config) => {
-      const response = await fetch(config.deviceCodeUrl, {
+      const response = await oauthFetch(config.deviceCodeUrl, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
         body: new URLSearchParams({ client_id: config.clientId }),
@@ -1174,7 +1223,7 @@ const PROVIDERS = {
     config: KILOCODE_CONFIG,
     flowType: "device_code",
     requestDeviceCode: async (config) => {
-      const response = await fetch(config.initiateUrl, {
+      const response = await oauthFetch(config.initiateUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
@@ -1196,7 +1245,7 @@ const PROVIDERS = {
       };
     },
     pollToken: async (config, deviceCode) => {
-      const response = await fetch(`${config.pollUrlBase}/${deviceCode}`);
+      const response = await oauthFetch(`${config.pollUrlBase}/${deviceCode}`);
       if (response.status === 202) return { ok: false, data: { error: "authorization_pending" } };
       if (response.status === 403) return { ok: false, data: { error: "access_denied", error_description: "Authorization denied by user" } };
       if (response.status === 410) return { ok: false, data: { error: "expired_token", error_description: "Authorization code expired" } };
@@ -1206,7 +1255,7 @@ const PROVIDERS = {
         // Fetch profile to get orgId for X-Kilocode-OrganizationID header
         let orgId = null;
         try {
-          const profileRes = await fetch(`${config.apiBaseUrl}/api/profile`, {
+          const profileRes = await oauthFetch(`${config.apiBaseUrl}/api/profile`, {
             headers: { "Authorization": `Bearer ${data.token}` }
           });
           if (profileRes.ok) {
@@ -1322,7 +1371,7 @@ const PROVIDERS = {
 
       // Validate before storing — otherwise a typo'd paste becomes a
       // connection that only fails later, at request time.
-      const validationRes = await fetch(config.validationUrl, {
+      const validationRes = await oauthFetch(config.validationUrl, {
         method: "GET",
         headers: { Accept: "application/json", Authorization: `Bearer ${accessToken}` },
       });
@@ -1334,7 +1383,7 @@ const PROVIDERS = {
       let userInfo = {};
       if (config.userInfoUrl) {
         try {
-          const userRes = await fetch(config.userInfoUrl, {
+          const userRes = await oauthFetch(config.userInfoUrl, {
             method: "GET",
             headers: { Accept: "application/json", Authorization: `Bearer ${accessToken}` },
           });
@@ -1392,7 +1441,7 @@ const PROVIDERS = {
         code_verifier: codeVerifier,
       });
       if (clientSecret) body.set("client_secret", clientSecret);
-      const response = await fetch(`${baseUrl}${config.tokenUrlPath}`, {
+      const response = await oauthFetch(`${baseUrl}${config.tokenUrlPath}`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
         body: body.toString(),
@@ -1400,7 +1449,7 @@ const PROVIDERS = {
       if (!response.ok) throw new Error(`GitLab token exchange failed: ${await response.text()}`);
       const tokens = await response.json();
       // Fetch user info
-      const userRes = await fetch(`${baseUrl}${config.userInfoUrlPath}`, {
+      const userRes = await oauthFetch(`${baseUrl}${config.userInfoUrlPath}`, {
         headers: { Authorization: `Bearer ${tokens.access_token}` },
       });
       const user = userRes.ok ? await userRes.json() : {};
@@ -1430,7 +1479,7 @@ const PROVIDERS = {
     config: CODEBUDDY_CONFIG,
     flowType: "device_code",
     requestDeviceCode: async (config) => {
-      const response = await fetch(`${config.stateUrl}?platform=${config.platform}`, {
+      const response = await oauthFetch(`${config.stateUrl}?platform=${config.platform}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1518,12 +1567,19 @@ export function getProviderNames() {
 /**
  * Generate auth data for a provider
  * @param {object} [meta] - Provider-specific metadata (e.g. gitlab clientId/baseUrl)
+ * @param {object} [proxyOptions] - Egress proxy for server-side calls in this
+ *   flow (resolveOAuthProxyOptions shape). Only xai fetches anything here
+ *   (OIDC discovery); authorize-URL building is local.
  */
-export async function generateAuthData(providerName, redirectUri, meta) {
-  const provider = getProvider(providerName);
-  const config = provider.prepareConfig
-    ? await provider.prepareConfig(provider.config, meta || {})
-    : provider.config;
+export async function generateAuthData(providerName, redirectUri, meta, proxyOptions = null) {
+  // runWithOAuthProxy is what provider implementations (and oauthFetch) read.
+  // An explicit non-null proxy wins; null/undefined preserves whatever ambient
+  // context the caller already established instead of clobbering it.
+  const run = async () => {
+    const provider = getProvider(providerName);
+    const config = provider.prepareConfig
+      ? await provider.prepareConfig(provider.config, meta || {})
+      : provider.config;
   const { codeVerifier, codeChallenge, state } = generatePKCE(provider.pkceVerifierBytes);
 
   let authUrl;
@@ -1546,37 +1602,47 @@ export async function generateAuthData(providerName, redirectUri, meta) {
     fixedPort: provider.fixedPort,
     callbackPath: provider.callbackPath || "/callback",
   };
+  };
+  return proxyOptions == null ? run() : runWithOAuthProxy(proxyOptions, run);
 }
 
 /**
  * Exchange code for tokens
  * @param {object} [meta] - Provider-specific metadata (e.g. gitlab clientId/baseUrl)
+ * @param {object} [proxyOptions] - Egress proxy for the token + userinfo calls
+ *   (resolveOAuthProxyOptions shape). Null keeps the previous direct behavior.
  */
-export async function exchangeTokens(providerName, code, redirectUri, codeVerifier, state, meta) {
-  const provider = getProvider(providerName);
-  const config = provider.prepareConfig
-    ? await provider.prepareConfig(provider.config, meta || {})
-    : provider.config;
+export async function exchangeTokens(providerName, code, redirectUri, codeVerifier, state, meta, proxyOptions = null) {
+  const run = async () => {
+    const provider = getProvider(providerName);
+    const config = provider.prepareConfig
+      ? await provider.prepareConfig(provider.config, meta || {})
+      : provider.config;
 
-  const tokens = await provider.exchangeToken(config, code, redirectUri, codeVerifier, state, meta || {});
+    const tokens = await provider.exchangeToken(config, code, redirectUri, codeVerifier, state, meta || {});
 
-  let extra = null;
-  if (provider.postExchange) {
-    extra = await provider.postExchange(tokens);
-  }
+    let extra = null;
+    if (provider.postExchange) {
+      extra = await provider.postExchange(tokens);
+    }
 
-  return provider.mapTokens(tokens, extra);
+    return provider.mapTokens(tokens, extra);
+  };
+  return proxyOptions == null ? run() : runWithOAuthProxy(proxyOptions, run);
 }
 
 /**
  * Request device code (for device_code flow)
  */
-export async function requestDeviceCode(providerName, codeChallenge, options) {
-  const provider = getProvider(providerName);
-  if (provider.flowType !== "device_code") {
-    throw new Error(`Provider ${providerName} does not support device code flow`);
-  }
-  return await provider.requestDeviceCode(provider.config, codeChallenge, options || {});
+export async function requestDeviceCode(providerName, codeChallenge, options, proxyOptions = null) {
+  const run = async () => {
+    const provider = getProvider(providerName);
+    if (provider.flowType !== "device_code") {
+      throw new Error(`Provider ${providerName} does not support device code flow`);
+    }
+    return await provider.requestDeviceCode(provider.config, codeChallenge, options || {});
+  };
+  return proxyOptions == null ? run() : runWithOAuthProxy(proxyOptions, run);
 }
 
 /**
@@ -1586,51 +1652,54 @@ export async function requestDeviceCode(providerName, codeChallenge, options) {
  * @param {string} codeVerifier - PKCE code verifier (optional for some providers)
  * @param {object} extraData - Extra data from device code response (e.g. clientId/clientSecret for Kiro)
  */
-export async function pollForToken(providerName, deviceCode, codeVerifier, extraData) {
-  const provider = getProvider(providerName);
-  if (provider.flowType !== "device_code") {
-    throw new Error(`Provider ${providerName} does not support device code flow`);
-  }
+export async function pollForToken(providerName, deviceCode, codeVerifier, extraData, proxyOptions = null) {
+  const run = async () => {
+    const provider = getProvider(providerName);
+    if (provider.flowType !== "device_code") {
+      throw new Error(`Provider ${providerName} does not support device code flow`);
+    }
 
-  const result = await provider.pollToken(provider.config, deviceCode, codeVerifier, extraData);
+    const result = await provider.pollToken(provider.config, deviceCode, codeVerifier, extraData);
 
-  if (result.ok) {
-    // For device code flows, success is only when we have an access token
-    if (result.data.access_token) {
-      // Call postExchange to get additional data (copilotToken, userInfo, etc.)
-      let extra = null;
-      if (provider.postExchange) {
-        extra = await provider.postExchange(result.data);
-      }
-      const tokens = provider.mapTokens(result.data, extra);
-      // Kiro IDC/Builder-ID tokens lack profileArn; resolve it to avoid 403
-      if (providerName === "kiro" && !tokens.providerSpecificData?.profileArn) {
-        const profileArn = await fetchKiroProfileArn(tokens.accessToken);
-        if (profileArn) tokens.providerSpecificData.profileArn = profileArn;
-      }
-      return { success: true, tokens };
-    } else {
-      // Check if it's still pending authorization
-      if (result.data.error === 'authorization_pending' || result.data.error === 'slow_down') {
-        // This is not a failure, just still waiting
-        return {
-          success: false,
-          error: result.data.error,
-          errorDescription: result.data.error_description || result.data.message,
-          pending: result.data.error === 'authorization_pending'
-        };
+    if (result.ok) {
+      // For device code flows, success is only when we have an access token
+      if (result.data.access_token) {
+        // Call postExchange to get additional data (copilotToken, userInfo, etc.)
+        let extra = null;
+        if (provider.postExchange) {
+          extra = await provider.postExchange(result.data);
+        }
+        const tokens = provider.mapTokens(result.data, extra);
+        // Kiro IDC/Builder-ID tokens lack profileArn; resolve it to avoid 403
+        if (providerName === "kiro" && !tokens.providerSpecificData?.profileArn) {
+          const profileArn = await fetchKiroProfileArn(tokens.accessToken);
+          if (profileArn) tokens.providerSpecificData.profileArn = profileArn;
+        }
+        return { success: true, tokens };
       } else {
-        // Actual error
-        return {
-          success: false,
-          error: result.data.error || 'no_access_token',
-          errorDescription: result.data.error_description || result.data.message || 'No access token received'
-        };
+        // Check if it's still pending authorization
+        if (result.data.error === 'authorization_pending' || result.data.error === 'slow_down') {
+          // This is not a failure, just still waiting
+          return {
+            success: false,
+            error: result.data.error,
+            errorDescription: result.data.error_description || result.data.message,
+            pending: result.data.error === 'authorization_pending'
+          };
+        } else {
+          // Actual error
+          return {
+            success: false,
+            error: result.data.error || 'no_access_token',
+            errorDescription: result.data.error_description || result.data.message || 'No access token received'
+          };
+        }
       }
     }
-  }
 
-  return { success: false, error: result.data.error, errorDescription: result.data.error_description };
+    return { success: false, error: result.data.error, errorDescription: result.data.error_description };
+  };
+  return proxyOptions == null ? run() : runWithOAuthProxy(proxyOptions, run);
 }
 
 // Run-once guard across the process lifetime

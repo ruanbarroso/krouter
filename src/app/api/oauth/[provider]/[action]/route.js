@@ -4,7 +4,8 @@ import {
   generateAuthData, 
   exchangeTokens, 
   requestDeviceCode, 
-  pollForToken 
+  pollForToken,
+  resolveOAuthProxyOptions
 } from "@/lib/oauth/providers";
 import { createProviderConnection } from "@/models";
 import {
@@ -33,7 +34,9 @@ async function completeXaiManualCode(code, state) {
       code,
       session.redirectUri,
       session.codeVerifier,
-      state
+      state,
+      undefined,
+      await resolveOAuthProxyOptions("xai")
     );
     const connection = await createProviderConnection({
       provider: "xai",
@@ -77,7 +80,7 @@ export async function GET(request, { params }) {
       const reservedParams = new Set(["redirect_uri"]);
       const meta = {};
       searchParams.forEach((value, key) => { if (!reservedParams.has(key)) meta[key] = value; });
-      const authData = await generateAuthData(provider, redirectUri, Object.keys(meta).length ? meta : undefined);
+      const authData = await generateAuthData(provider, redirectUri, Object.keys(meta).length ? meta : undefined, await resolveOAuthProxyOptions(provider));
       return NextResponse.json(authData);
     }
 
@@ -138,7 +141,8 @@ export async function GET(request, { params }) {
         return NextResponse.json({ error: "Provider does not support device code flow" }, { status: 400 });
       }
 
-      const authData = await generateAuthData(provider, null);
+      const oauthProxy = await resolveOAuthProxyOptions(provider);
+      const authData = await generateAuthData(provider, null, undefined, oauthProxy);
       const startUrl = searchParams.get("start_url");
       const region = searchParams.get("region");
       const authMethod = searchParams.get("auth_method");
@@ -154,10 +158,10 @@ export async function GET(request, { params }) {
       const noPkceDeviceProviders = ["github", "kiro", "kimi-coding", "kilocode", "codebuddy-cn", "qoder", "grok-cli"];
       let deviceData;
       if (noPkceDeviceProviders.includes(provider)) {
-        deviceData = await requestDeviceCode(provider, undefined, deviceOptions);
+        deviceData = await requestDeviceCode(provider, undefined, deviceOptions, oauthProxy);
       } else {
         // Qwen and other PKCE providers
-        deviceData = await requestDeviceCode(provider, authData.codeChallenge, deviceOptions);
+        deviceData = await requestDeviceCode(provider, authData.codeChallenge, deviceOptions, oauthProxy);
       }
 
       return NextResponse.json({
@@ -239,7 +243,7 @@ export async function POST(request, { params }) {
       }
 
       // Exchange code for tokens (meta carries provider-specific params, e.g. gitlab clientId/baseUrl)
-      const tokenData = await exchangeTokens(provider, code, redirectUri, codeVerifier, state, meta);
+      const tokenData = await exchangeTokens(provider, code, redirectUri, codeVerifier, state, meta, await resolveOAuthProxyOptions(provider));
 
       // Save to database
       const connection = await createProviderConnection({
@@ -272,12 +276,14 @@ export async function POST(request, { params }) {
 
       // Providers that don't use PKCE for device code
       const noPkceProviders = ["github", "kimi-coding", "kilocode", "codebuddy-cn"];
+      // Egress proxy for this provider's pool (null = direct, as before).
+      const pollProxy = await resolveOAuthProxyOptions(provider);
       let result;
       if (noPkceProviders.includes(provider)) {
-        result = await pollForToken(provider, deviceCode);
+        result = await pollForToken(provider, deviceCode, undefined, undefined, pollProxy);
       } else if (provider === "kiro") {
         // Kiro needs extraData (clientId, clientSecret) from device code response
-        result = await pollForToken(provider, deviceCode, null, extraData);
+        result = await pollForToken(provider, deviceCode, null, extraData, pollProxy);
       } else if (provider === "qoder") {
         // Qoder needs both the PKCE verifier (codeVerifier) and the machineId
         // captured at device-code time (extraData._qoderMachineId) so
@@ -285,13 +291,13 @@ export async function POST(request, { params }) {
         if (!codeVerifier) {
           return NextResponse.json({ error: "Missing code verifier" }, { status: 400 });
         }
-        result = await pollForToken(provider, deviceCode, codeVerifier, extraData);
+        result = await pollForToken(provider, deviceCode, codeVerifier, extraData, pollProxy);
       } else {
         // Qwen and other PKCE providers
         if (!codeVerifier) {
           return NextResponse.json({ error: "Missing code verifier" }, { status: 400 });
         }
-        result = await pollForToken(provider, deviceCode, codeVerifier);
+        result = await pollForToken(provider, deviceCode, codeVerifier, undefined, pollProxy);
       }
 
       if (result.success) {
