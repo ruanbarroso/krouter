@@ -5,12 +5,16 @@ import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { deriveSessionId } from "../utils/sessionManager.js";
 import { openaiToOpenAIResponsesRequest } from "../translator/request/openai-responses.js";
 import { openaiResponsesToOpenAIResponse } from "../translator/response/openai-responses.js";
-import { initState } from "../translator/index.js";
+import { translateRequest, translateResponse, initState } from "../translator/index.js";
+import { FORMATS } from "../translator/formats.js";
 import { parseSSELine, formatSSE } from "../utils/streamHelpers.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 
-// Models that use /zen/v1/messages (claude format)
-const MESSAGES_MODELS = new Set();
+// Models that use /zen/v1/messages (Anthropic Messages shape).
+// union-alpha is a stealth agentic-coding model the opencode frontend serves
+// exclusively over /zen/v1/messages with the Anthropic SDK — posting it to
+// /chat/completions 500s on every account (measured 2026-09-18).
+const MESSAGES_MODELS = new Set(["union-alpha"]);
 
 // Models that only serve /zen/v1/responses (OpenAI Responses API).
 // Measured 2026-09-09: muse-spark-* 200 on /responses, deterministic 500 on
@@ -143,7 +147,92 @@ export class OpenCodeExecutor extends BaseExecutor {
     if (isOpenCodeResponsesModel(args.model)) {
       return this.executeWithResponsesEndpoint({ ...args, credentials });
     }
+    if (MESSAGES_MODELS.has(args.model)) {
+      return this.executeWithMessagesEndpoint({ ...args, credentials });
+    }
     return super.execute({ ...args, credentials });
+  }
+
+  // union-alpha and friends arrive OpenAI-shaped but only serve the Anthropic
+  // Messages endpoint — same shim as the github executor's /v1/messages path:
+  // translate OpenAI→Claude, force stream upstream (chatCore buffers SSE into
+  // a single JSON reply for non-streaming clients), translate events back.
+  async executeWithMessagesEndpoint({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
+    const url = this.buildUrl(model);
+    const headers = this.buildHeaders(credentials, true);
+    const translatedBody = translateRequest(FORMATS.OPENAI, FORMATS.CLAUDE, model, body, true, credentials, "opencode");
+    // _toolNameMap is internal bookkeeping; strip it before dispatch.
+    const toolNameMap = translatedBody._toolNameMap;
+    delete translatedBody._toolNameMap;
+
+    log?.debug?.("OPENCODE", `Sending translated request to /zen/v1/messages for ${model}`);
+
+    const response = await proxyAwareFetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(translatedBody),
+      signal,
+    }, proxyOptions);
+
+    if (!response.ok) {
+      return { response, url, headers, transformedBody: translatedBody };
+    }
+
+    const state = initState(FORMATS.CLAUDE);
+    state.model = model;
+    if (toolNameMap) state.toolNameMap = toolNameMap;
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    const emitAll = (controller, chunks) => {
+      for (const c of chunks) {
+        controller.enqueue(new TextEncoder().encode(formatSSE(c, "openai")));
+      }
+    };
+
+    const transformStream = new TransformStream({
+      async transform(chunk, controller) {
+        buffer += decoder.decode(chunk, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          const parsed = parseSSELine(trimmed);
+          if (!parsed) continue;
+          if (parsed.done && stream === true) {
+            controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+            continue;
+          }
+          emitAll(controller, translateResponse(FORMATS.CLAUDE, FORMATS.OPENAI, parsed, state));
+        }
+      },
+      flush(controller) {
+        if (buffer.trim()) {
+          const parsed = parseSSELine(buffer.trim());
+          if (parsed && !parsed.done) {
+            emitAll(controller, translateResponse(FORMATS.CLAUDE, FORMATS.OPENAI, parsed, state));
+          }
+        }
+      },
+    });
+
+    if (!response.body) {
+      return { response: new Response("", { status: response.status, headers: response.headers }), url, headers, transformedBody: translatedBody };
+    }
+    const convertedStream = response.body.pipeThrough(transformStream);
+
+    return {
+      response: new Response(convertedStream, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      }),
+      url,
+      headers,
+      transformedBody: translatedBody,
+    };
   }
 
   buildHeaders(credentials, stream = true) {
