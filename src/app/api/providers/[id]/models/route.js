@@ -394,9 +394,34 @@ const PROVIDER_MODELS_CONFIG = {
     url: "https://models.dev/api.json",
     method: "GET",
     headers: { "Content-Type": "application/json" },
-    parseResponse: (data) => Object.values(data).flatMap(provider =>
-      Object.entries(provider.models || {}).map(([id, m]) => ({ id, name: m.name || id }))
-    )
+    // models.dev has no `mimo-auto` entry and no `mimo-free` provider: the
+    // free channel only serves the `mimo-auto` alias (paid Token Plan ids
+    // 400 on it), while models.dev lists the paid Xiaomi ids under
+    // `xiaomi` / `xiaomi-token-plan-*`. Flattening everything here used to
+    // surface thousands of unrelated providers as addable MiMo models.
+    // Return only the Xiaomi/MiMo ids plus the free-channel alias so the
+    // dashboard reflects what the provider actually serves.
+    parseResponse: (data) => {
+      const out = [];
+      const seen = new Set();
+      const push = (id, name) => {
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        out.push({ id, name: name || id });
+      };
+      for (const [providerId, provider] of Object.entries(data || {})) {
+        if (!/xiaomi|mimo/i.test(providerId)) continue;
+        for (const [id, m] of Object.entries(provider.models || {})) {
+          push(id, m?.name);
+        }
+      }
+      // Free-channel alias — not listed by models.dev, but it is the only
+      // id the free endpoint accepts. Keep it first so it stays visible.
+      if (!seen.has("mimo-auto")) {
+        out.unshift({ id: "mimo-auto", name: "MiMo Auto" });
+      }
+      return out;
+    }
   },
 
   // Custom resolvers (non-OpenAI-shaped APIs / token-refresh flows)
@@ -678,6 +703,16 @@ export async function GET(request, { params }) {
     }
     if (config.authHeader && !config.authQuery && token) {
       headers[config.authHeader] = (config.authPrefix || "") + token;
+    }
+    // Claude Code connects via OAuth subscription, not an Anthropic API key:
+    // the stored credential is an OAuth access token, which
+    // api.anthropic.com rejects as `x-api-key` but accepts as a Bearer
+    // token. API-key connections keep working through `x-api-key` above;
+    // sending both lets each credential shape authenticate the way its
+    // issuer expects, so the dashboard lists the live catalog either way
+    // instead of silently falling back to the hardcoded list.
+    if ((effectiveProvider === "claude" || effectiveProvider === "anthropic") && token && !headers.Authorization) {
+      headers.Authorization = `Bearer ${token}`;
     }
 
     // Make request

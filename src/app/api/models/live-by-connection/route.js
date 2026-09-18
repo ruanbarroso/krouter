@@ -46,7 +46,7 @@ async function fetchWithTimeout(url, opts) {
   } finally { clearTimeout(timer); }
 }
 
-function buildRequest(fetcher, apiKey) {
+function buildRequest(fetcher, apiKey, provider) {
   const headers = {
     "Content-Type": "application/json",
     "User-Agent": LIVE_FETCH_USER_AGENT,
@@ -59,6 +59,13 @@ function buildRequest(fetcher, apiKey) {
     url = u.toString();
   } else if (fetcher.authHeader) {
     headers[fetcher.authHeader] = `${fetcher.authPrefix || ""}${apiKey}`;
+    // Same OAuth/API-key duality as the per-provider models route: Claude
+    // Code stores an OAuth access token, which api.anthropic.com only
+    // accepts as Bearer. Keep x-api-key for API keys and add Bearer so
+    // OAuth connections list the live catalog too.
+    if ((provider === "claude" || provider === "anthropic") && !headers.Authorization) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
   }
   return { url, headers };
 }
@@ -144,7 +151,7 @@ export async function GET(request) {
   }
 
   try {
-    const { url: liveUrl, headers } = buildRequest(fetcher, apiKey);
+    const { url: liveUrl, headers } = buildRequest(fetcher, apiKey, provider);
     const res = await fetchWithTimeout(liveUrl, { method: "GET", headers });
     if (!res.ok) {
       const errText = await res.text().catch(() => "");

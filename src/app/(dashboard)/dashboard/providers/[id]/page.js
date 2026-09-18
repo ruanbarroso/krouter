@@ -1071,6 +1071,25 @@ export default function ProviderDetailPage() {
     }
   };
 
+  // Available Models is driven by the provider's live catalog, never by a
+  // hardcoded list alone. Precedence: live API via the user's connection
+  // (authenticated catalog) → public suggested catalog (modelsFetcher, works
+  // without a connection) → static PROVIDER_MODELS (offline fallback only).
+  // This keeps /dashboard/providers/[id] showing exactly what the provider
+  // serves right now: NVIDIA's 2 stale hardcoded ids disappear the moment
+  // integrate.api.nvidia.com answers, OpenCode Zen lists the 70 live ids
+  // instead of an empty static list, and OAuth providers (Claude, Codex,
+  // Kiro) switch to their per-account catalog as soon as a connection
+  // exists. No provider id is hardcoded here — the rule is uniform.
+  const getCatalogBase = () => {
+    if (liveModels.length > 0) return liveModels;
+    if (suggestedModels.length > 0) return suggestedModels;
+    return models;
+  };
+  const catalogSource = liveModels.length > 0
+    ? "live"
+    : (suggestedModels.length > 0 ? "suggested" : "static");
+
   const renderModelsSection = () => {
     if (isCompatible) {
       return (
@@ -1087,11 +1106,13 @@ export default function ProviderDetailPage() {
         />
       );
     }
-    // Combine hardcoded models with Kilo free models (deduplicated)
+    // Catalog base comes from getCatalogBase() (live → suggested → static),
+    // plus Kilo free models for kilocode only (deduplicated).
     // Exclude non-llm models (embedding, tts, etc.) — they have dedicated pages under media-providers
+    const catalogBase = getCatalogBase();
     const allModels = [
-      ...models,
-      ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
+      ...catalogBase,
+      ...kiloFreeModels.filter((fm) => !catalogBase.some((m) => m.id === fm.id)),
     ].filter((m) => !m.type || m.type === "llm");
     const disabledSet = new Set(disabledModelIds);
     const displayModels = allModels.filter((m) => !disabledSet.has(m.id));
@@ -1102,10 +1123,10 @@ export default function ProviderDetailPage() {
         const prefix = `${providerStorageAlias}/`;
         if (!fullModel.startsWith(prefix)) return false;
         const modelId = fullModel.slice(prefix.length);
-        // Only show if not already in hardcoded list
+        // Only show if not already in the live catalog base
         // For passthroughModels, include all aliases (model IDs may contain slashes like "anthropic/claude-3")
-        if (providerInfo.passthroughModels) return !models.some((m) => m.id === modelId);
-        return !models.some((m) => m.id === modelId) && alias === modelId;
+        if (providerInfo.passthroughModels) return !catalogBase.some((m) => m.id === modelId);
+        return !catalogBase.some((m) => m.id === modelId) && alias === modelId;
       })
       .map(([alias, fullModel]) => ({
         id: fullModel.slice(`${providerStorageAlias}/`.length),
@@ -1182,21 +1203,25 @@ export default function ProviderDetailPage() {
           </button>
         )}
 
-        {/* Unified model browser — live API first, suggested as fallback + Recently Dropped */}
+        {/* Unified model browser — whatever the live/suggested APIs return that
+            is not already in Available above + Recently Dropped */}
         {(() => {
           // Build a set of all model IDs already visible in Available Models section
-          // (active hardcoded, active kilo-free, and custom API-added models)
+          // (active catalog, active kilo-free, and custom API-added models)
           const activeIds = new Set([
             ...displayModels.map(m => m.id),
             ...customModels.map(m => m.id),
           ]);
 
-          // Source: live API models preferred, fall back to suggested
+          // Source: live API models preferred, fall back to suggested.
+          // When Available already shows the live catalog, this naturally
+          // yields zero unadded — the section then hides (see early return
+          // below) instead of printing an empty "From API (0)" bar.
           const sourceModels = liveModels.length > 0 ? liveModels : suggestedModels;
           const isLive = liveModels.length > 0;
           const notAdded = sourceModels.filter(m => m.id && !activeIds.has(m.id));
 
-          // Recently Dropped = hardcoded/kilo models disabled via X button
+          // Recently Dropped = catalog models disabled via X button
           // If a dropped model re-appears in liveModels, treat it as normal (addable)
           const liveModelIds = new Set(liveModels.map(m => m.id).filter(Boolean));
           const droppedModels = disabledDisplayModels
@@ -1205,10 +1230,10 @@ export default function ProviderDetailPage() {
 
           const droppedIdSet = new Set(droppedModels.map(m => m.id));
 
-          // All browsable = unadded models + recently dropped (no overlap since dropped are hardcoded, notAdded are from API/suggested)
+          // All browsable = unadded models + recently dropped (no overlap since dropped are catalog, notAdded are from API/suggested)
           const allBrowsable = [...notAdded.filter(m => !droppedIdSet.has(m.id)), ...droppedModels];
 
-          if (!liveModelsLoading && allBrowsable.length === 0 && sourceModels.length === 0) return null;
+          if (!liveModelsLoading && allBrowsable.length === 0) return null;
 
           // Filter by search
           const q = liveModelsSearch.trim().toLowerCase();
@@ -1739,16 +1764,32 @@ export default function ProviderDetailPage() {
         </Card>
       )}
 
-      {/* Models */}
+      {/* Models — Available always mirrors the live provider catalog
+          (live API → public suggested → static fallback); see getCatalogBase. */}
       <Card id="available-models-section">
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <h2 className="text-lg font-semibold">
+          <h2 className="text-lg font-semibold flex items-center gap-2">
             {"Available Models"}
+            {!isCompatible && catalogSource !== "static" && (
+              <span
+                className={`rounded-md px-1.5 py-0.5 text-[10px] font-medium ${
+                  catalogSource === "live"
+                    ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                    : "bg-blue-500/15 text-blue-600 dark:text-blue-400"
+                }`}
+                title={catalogSource === "live"
+                  ? "Live catalog fetched from the provider API via your connection"
+                  : "Public catalog fetched from the provider API (no connection needed)"}
+              >
+                {catalogSource === "live" ? "Live" : "Suggested"}
+              </span>
+            )}
           </h2>
           {!isCompatible && (() => {
+            const catalogBase = getCatalogBase();
             const allIds = [
-              ...models,
-              ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
+              ...catalogBase,
+              ...kiloFreeModels.filter((fm) => !catalogBase.some((m) => m.id === fm.id)),
             ].filter((m) => !m.type || m.type === "llm").map((m) => m.id);
             const activeIds = allIds.filter((id) => !disabledModelIds.includes(id));
             return (

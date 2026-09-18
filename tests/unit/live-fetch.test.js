@@ -69,6 +69,11 @@ describe("getLiveFetcher", () => {
     expect(list).toContain("openai");
     expect(list).toContain("kimi");     // newly added
     expect(list).toContain("deepgram"); // newly added
+    // OpenCode Zen shares the zen/v1/models catalog with opencode-go but
+    // the dashboard provider id is `opencode` — without this entry
+    // live-by-connection returned "no_fetcher" for Zen.
+    expect(list).toContain("opencode");
+    expect(getLiveFetcher("opencode")?.url).toBe("https://opencode.ai/zen/v1/models");
   });
 });
 

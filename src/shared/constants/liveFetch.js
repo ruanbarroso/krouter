@@ -99,6 +99,11 @@ export const LIVE_FETCH = {
   blackbox:      openaiShape("https://api.blackbox.ai/v1/models"),
   commandcode:   openaiShape("https://api.commandcode.ai/v1/models"),
   "opencode-go": openaiShape("https://opencode.ai/zen/v1/models"),
+  // OpenCode Zen uses the same public catalog endpoint as Go. Listed
+  // separately because the dashboard provider id is `opencode` (alias `oc`),
+  // not `opencode-go` — without this entry live-by-connection returned
+  // "no_fetcher" for Zen even though the endpoint needs no key.
+  opencode:      openaiShape("https://opencode.ai/zen/v1/models"),
 
   // Embeddings-only providers — same shape, /v1/models works.
   "voyage-ai":   openaiShape("https://api.voyageai.com/v1/models"),
