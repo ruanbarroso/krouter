@@ -20,6 +20,10 @@ import {
 } from "../../src/shared/utils/circuitBreaker.js";
 import { findOffendingField } from "../services/modelStrip.js";
 import {
+  isThinkingSignatureError,
+  stripThinkingBlocks,
+} from "../services/thinkingSignatureRecovery.js";
+import {
   getValidApiKey,
   recordKeyFailure,
   recordKeySuccess,
@@ -308,6 +312,25 @@ export class BaseExecutor {
                 method: "POST", headers, body: JSON.stringify(transformedBody), signal: mergedSignal
               }, proxyOptions);
               return { response: retryResponse, url, headers, transformedBody };
+            }
+
+            // 3. Stale thinking signature (long sessions: client-side
+            // compaction rewrites thinking text, invalidating the original
+            // signature, which Anthropic validates byte-for-byte). The
+            // gateway cannot mint a replacement, but thinking history is
+            // optional context — retry once without thinking blocks so the
+            // turn succeeds on the SAME account instead of burning a combo
+            // fallback step. Pairs with the errorConfig cooldownMs:0 rule.
+            if (isThinkingSignatureError(response.status, bodyText)) {
+              const { body: thinkingStripped, stripped: strippedCount } = stripThinkingBlocks(sourceBody);
+              if (strippedCount > 0) {
+                log?.info?.("THINKCAP", `${this.provider}/${model} → stale thinking signature, stripped ${strippedCount} block(s) and retrying`);
+                transformedBody = this.transformRequest(model, thinkingStripped, stream, effectiveCredentials);
+                const retryResponse = await proxyAwareFetch(url, {
+                  method: "POST", headers, body: JSON.stringify(transformedBody), signal: mergedSignal
+                }, proxyOptions);
+                return { response: retryResponse, url, headers, transformedBody };
+              }
             }
 
           } catch (e) {
