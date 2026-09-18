@@ -15,6 +15,7 @@
 import { NextResponse } from "next/server";
 import { getProviderConnections } from "@/lib/localDb";
 import { getLiveFetcher, LIVE_FETCH_USER_AGENT } from "@/shared/constants/liveFetch.js";
+import { resolveCatalogEgress, catalogFetch } from "@/lib/network/catalogEgress.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,11 +39,11 @@ function setCached(k, data) {
   cache.set(k, { data, expiresAt: Date.now() + CACHE_TTL_MS });
 }
 
-async function fetchWithTimeout(url, opts) {
+async function fetchWithTimeout(url, opts, proxyOptions) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...opts, signal: ctrl.signal });
+    return await catalogFetch(url, { ...opts, signal: ctrl.signal }, proxyOptions);
   } finally { clearTimeout(timer); }
 }
 
@@ -150,9 +151,14 @@ export async function GET(request) {
     );
   }
 
+  // Catalog fetches follow the same egress as serving traffic (per-connection
+  // pool, then providerStrategies.<provider>.proxyPoolId, then direct) so the
+  // live catalog works on hosts with fail-closed outbound firewalls.
+  const proxyOptions = await resolveCatalogEgress(provider, connection.providerSpecificData || null);
+
   try {
     const { url: liveUrl, headers } = buildRequest(fetcher, apiKey, provider);
-    const res = await fetchWithTimeout(liveUrl, { method: "GET", headers });
+    const res = await fetchWithTimeout(liveUrl, { method: "GET", headers }, proxyOptions);
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
       return NextResponse.json(
