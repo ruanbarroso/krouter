@@ -332,6 +332,21 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   // upstream 70ba0024 — keep the caller's cache key so upstream prompt caching
   // actually keys on the same value across turns.
   if (body.prompt_cache_key !== undefined) result.prompt_cache_key = body.prompt_cache_key;
+  // The Responses API carries the JSON contract as `text.format` instead of
+  // `response_format`. Same field names underneath, so this is a rename, not a
+  // reinterpretation — `strict` is forwarded only when the caller set it.
+  const rf = body.response_format;
+  if (rf?.type === "json_object") {
+    result.text = { ...(result.text || {}), format: { type: "json_object" } };
+  } else if (rf?.type === "json_schema" && rf.json_schema?.schema) {
+    const format = {
+      type: "json_schema",
+      name: rf.json_schema.name || "response",
+      schema: rf.json_schema.schema
+    };
+    if (rf.json_schema.strict !== undefined) format.strict = rf.json_schema.strict;
+    result.text = { ...(result.text || {}), format };
+  }
 
   return result;
 }

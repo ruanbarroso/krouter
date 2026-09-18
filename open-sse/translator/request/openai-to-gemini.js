@@ -35,6 +35,39 @@ function sanitizeGeminiFunctionName(name) {
   return sanitized.substring(0, 64);
 }
 
+// Forced function calling is ANY mode on Google's side, and Google rejects it
+// together with a JSON response mime type:
+//   "Forced function calling (ANY mode) with a response mime type:
+//    'application/json' is unsupported" (400 INVALID_ARGUMENT)
+// In that mode the model emits a function call rather than text, so the response
+// schema has nothing to constrain — dropping it keeps the call alive without
+// changing what comes back.
+function isForcedToolChoice(toolChoice) {
+  if (!toolChoice) return false;
+  if (toolChoice === "required" || toolChoice === "any") return true;
+  return typeof toolChoice === "object" && (toolChoice.type === "function" || toolChoice.type === "tool");
+}
+
+// The Gemini native API has no `response_format`; it expresses the same contract
+// through generationConfig.responseMimeType/responseSchema. Without this the
+// field was dropped in translation and the model answered free-form prose with
+// HTTP 200, which reads downstream as "the model ignored the schema".
+export function applyGeminiResponseFormat(result, body) {
+  const rf = body?.response_format;
+  if (rf?.type !== "json_object" && rf?.type !== "json_schema") return result;
+  if (isForcedToolChoice(body.tool_choice)) return result;
+
+  result.generationConfig.responseMimeType = "application/json";
+
+  // responseSchema is the same OpenAPI subset the function declarations use, so
+  // it needs the same sanitiser (no additionalProperties, no $schema, ...).
+  const schema = rf.type === "json_schema" ? rf.json_schema?.schema : null;
+  if (schema && typeof schema === "object") {
+    result.generationConfig.responseSchema = cleanJSONSchemaForAntigravity(structuredClone(schema));
+  }
+  return result;
+}
+
 // Core: Convert OpenAI request to Gemini format (base for all variants)
 function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG_SIGNATURE) {
   const result = {
@@ -57,6 +90,8 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
   if (body.max_tokens !== undefined) {
     result.generationConfig.maxOutputTokens = body.max_tokens;
   }
+
+  applyGeminiResponseFormat(result, body);
 
   // Build tool_call_id -> name map
   const tcID2Name = {};
