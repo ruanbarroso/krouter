@@ -10,10 +10,12 @@ import { execSync } from "node:child_process";
  * equivalents (`secondary` = bg-surface-2 / text-text-main / border-border).
  */
 
-const files = execSync(
-  "git ls-files 'src/**/*.js' | grep -E '(dashboard|shared)' || true",
-  { encoding: "utf8" }
-).split("\n").filter(Boolean);
+// Mesmo motivo de text-contrast.test.js: o pipeline de shell não roda no
+// cmd.exe e derrubava a coleta do arquivo inteiro no Windows.
+const files = execSync("git ls-files", { encoding: "utf8" })
+  .split("\n")
+  .map((f) => f.trim())
+  .filter((f) => f.startsWith("src/") && f.endsWith(".js") && /(dashboard|shared)/.test(f));
 
 // `!important` on a hardcoded light or dark colour -- the combination that locks a
 // theme out. Non-important utilities are fine: a theme can still override them.

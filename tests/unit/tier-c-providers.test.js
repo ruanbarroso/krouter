@@ -655,7 +655,10 @@ describe("grok-cli token refresh (0.5.111 fix)", () => {
   // which needs a clientId grok-cli's backend config lacks → refresh always
   // failed → OAuth connections died after ~8h. grok-cli tokens are xai tokens.
   it("routes grok-cli refresh through the xai path", () => {
-    const src = readFileSync("open-sse/services/tokenRefresh.js", "utf8");
+    // Normaliza CRLF: `.` em regex NÃO casa `\r` (é terminador de linha), então
+    // `(?:.*\n)*?` não atravessa uma única linha num checkout Windows e a
+    // asserção falhava com o código correto na frente.
+    const src = readFileSync("open-sse/services/tokenRefresh.js", "utf8").replace(/\r\n/g, "\n");
     // The two cases must share the refreshXaiToken return.
     expect(src).toMatch(/case "xai":\s*\n(?:.*\n)*?\s*case "grok-cli":\s*\n\s*return refreshXaiToken/);
   });

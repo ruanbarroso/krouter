@@ -17,10 +17,15 @@ import { execSync } from "node:child_process";
  * tone is ever wanted, move the token itself rather than mixing it toward the surface.
  */
 
-const files = execSync(
-  "git ls-files 'src/**/*.js' | grep -E '(dashboard|shared)' || true",
-  { encoding: "utf8" }
-).split("\n").filter(Boolean);
+// Pipeline de shell aqui não roda no Windows: execSync cai no cmd.exe, que não
+// trata aspas simples nem conhece grep, e o arquivo inteiro falhava na COLETA
+// com "'shared)'' não é reconhecido" — zero testes executados, não uma falha
+// visível. `git ls-files` sozinho é portável (sempre devolve caminhos com /);
+// o filtro vai para o JS.
+const files = execSync("git ls-files", { encoding: "utf8" })
+  .split("\n")
+  .map((f) => f.trim())
+  .filter((f) => f.startsWith("src/") && f.endsWith(".js") && /(dashboard|shared)/.test(f));
 
 // Tailwind alpha modifier applied to the muted/secondary text tokens.
 const THINNED_TEXT = /\btext-(?:text-muted|text-secondary)\/(\d{1,3})\b/;

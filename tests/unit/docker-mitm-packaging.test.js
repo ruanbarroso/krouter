@@ -23,6 +23,17 @@ function walk(dir) {
   return out;
 }
 
+/**
+ * Caminho relativo à raiz SEMPRE com "/". No Windows `path.relative` devolve
+ * `src\mitm\paths`, que nunca casa com o `"src/mitm"` testado abaixo nem com
+ * os caminhos do Dockerfile — o efeito era classificar TODO require interno
+ * como se escapasse, e o teste acusava 53 módulos ausentes da imagem que na
+ * verdade estão cobertos.
+ */
+function relPosix(abs) {
+  return path.relative(ROOT, abs).split(path.sep).join("/");
+}
+
 /** Every relative require in src/mitm that resolves outside src/mitm. */
 function escapingRequires() {
   const escapes = [];
@@ -30,9 +41,9 @@ function escapingRequires() {
     const src = readFileSync(file, "utf8");
     for (const m of src.matchAll(/require\(\s*["'](\.[^"']+)["']\s*\)/g)) {
       const abs = path.resolve(path.dirname(file), m[1]);
-      const rel = path.relative(ROOT, abs);
+      const rel = relPosix(abs);
       if (!rel.startsWith("src/mitm")) {
-        escapes.push({ from: path.relative(ROOT, file), target: rel });
+        escapes.push({ from: relPosix(file), target: rel });
       }
     }
   }

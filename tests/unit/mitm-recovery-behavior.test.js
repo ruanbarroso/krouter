@@ -45,6 +45,23 @@ const writeMarker = (body = { reason: "crash-loop", restarts: 2 }) =>
 
 const markerExists = () => fs.existsSync(path.join(tempDir, MARKER));
 
+/**
+ * Conexão de leitura fora de banda com o arquivo SQLite, pelo primeiro driver
+ * disponível — a mesma ordem que src/lib/db/driver.js usa (better-sqlite3 e,
+ * na falta do binário nativo, o node:sqlite embutido).
+ */
+async function openReadOnly(file) {
+  try {
+    const Database = (await import("better-sqlite3")).default;
+    const db = new Database(file, { readonly: true });
+    return { get: (sql) => db.prepare(sql).get(), close: () => db.close() };
+  } catch {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(file, { readOnly: true });
+    return { get: (sql) => db.prepare(sql).get(), close: () => db.close() };
+  }
+}
+
 describe("MITM crash-loop recovery, driven for real", () => {
   it("does nothing when there is no marker", async () => {
     const { consumeMitmRecoveryMarker } = await import("@/shared/services/mitmRecovery");
@@ -84,10 +101,15 @@ describe("MITM crash-loop recovery, driven for real", () => {
 
     // Read it back out of band, through a different connection, so this cannot
     // pass on a cached object.
-    const Database = (await import("better-sqlite3")).default;
-    const db = new Database(dbFile, { readonly: true });
+    //
+    // O driver aqui não importa — o que o teste afirma é que os bytes chegaram
+    // ao arquivo. Cravar better-sqlite3 fazia o teste falhar em qualquer
+    // máquina sem o binário nativo compilado (o caso desta), enquanto o app
+    // rodava normalmente pelo node:sqlite, que é justamente o fallback do
+    // driver. Usa o que estiver disponível, na mesma ordem do src/lib/db.
+    const db = await openReadOnly(dbFile);
     try {
-      const row = db.prepare("SELECT data FROM settings WHERE id = 1").get();
+      const row = db.get("SELECT data FROM settings WHERE id = 1");
       expect(row).toBeTruthy();
       expect(JSON.parse(row.data).mitmEnabled).toBe(false);
     } finally {

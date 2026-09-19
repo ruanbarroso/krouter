@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { closeDbAndRemove } from "../helpers/tempDb.js";
 
 const originalDataDir = process.env.DATA_DIR;
 
@@ -16,8 +17,8 @@ async function setupDb() {
   return {
     createProviderNode,
     getModelInfo,
-    cleanup() {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+    async cleanup() {
+      await closeDbAndRemove(tempDir);
     },
   };
 }
@@ -29,11 +30,13 @@ describe("model routing", () => {
     vi.clearAllMocks();
   });
 
-  afterEach(() => {
-    vi.resetModules();
+  afterEach(async () => {
     vi.clearAllMocks();
-    cleanup();
+    // cleanup() ANTES de resetModules(): ele precisa do módulo do banco vivo
+    // para fechar o handle, senão o rm falha com EPERM no Windows.
+    await cleanup();
     cleanup = () => {};
+    vi.resetModules();
     if (originalDataDir === undefined) delete process.env.DATA_DIR;
     else process.env.DATA_DIR = originalDataDir;
   });
