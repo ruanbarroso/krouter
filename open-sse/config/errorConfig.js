@@ -153,8 +153,17 @@ export const ERROR_RULES = [
   // o que derruba tráfego LIMPO de outros modelos do mesmo provedor. Não faz
   // fallback e não esfria a conta (mesmo padrão das regras de tamanho de
   // entrada acima); o erro sobe honesto para o chamador.
-  { text: "free tier can only be used from within opencode", shouldFallback: false, cooldownMs: 0 },
-  { text: "freetiererror",                                   shouldFallback: false, cooldownMs: 0 },
+  //
+  // `advanceCombo: true` (2026-09-19, segunda passada): `shouldFallback:false`
+  // responde DUAS perguntas que não são a mesma — "tentar outra CONTA deste
+  // provedor?" (não: a chave `public` é a mesma em todo relay) e "tentar o
+  // próximo MODELO do combo?" (sim: é outro provedor, sem relação com o Zen).
+  // Sem esta marca, o `combo.js` lia o primeiro `false` como resposta à
+  // segunda e abortava o combo inteiro no degrau 1 — o `barroso-chat` parou de
+  // alcançar os degraus 2/3/4 e o gateway acima leu o 403 como cota,
+  // devolvendo `429 usage_limit_reached` a cada pedido.
+  { text: "free tier can only be used from within opencode", shouldFallback: false, advanceCombo: true, cooldownMs: 0 },
+  { text: "freetiererror",                                   shouldFallback: false, advanceCombo: true, cooldownMs: 0 },
   { text: "rate limit",                backoff: true },
   { text: "too many requests",         backoff: true },
   { text: "quota exceeded",            backoff: true },

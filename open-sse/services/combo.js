@@ -358,7 +358,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       }
 
       // Check if should fallback to next model
-      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
+      const { shouldFallback, cooldownMs, advanceCombo } = checkFallbackError(result.status, errorText);
 
       // Combo override: "model not found" 404 means THIS specific model is gone
       // upstream — but the NEXT combo entry is a DIFFERENT model that might exist.
@@ -381,7 +381,12 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         }
       }
 
-      if (!shouldFallback && !isModelNotFound) {
+      // `advanceCombo` é o mesmo force-advance do `isModelNotFound` acima, pedido
+      // pela regra em vez de deduzido do status: o erro condena ESTE modelo (ou a
+      // credencial compartilhada dele), e o próximo degrau é outro provedor. Sem
+      // isto, uma regra escrita para conter o fan-out entre CONTAS silenciava o
+      // combo inteiro — ver o bloqueio de free tier do Zen no `errorConfig.js`.
+      if (!shouldFallback && !isModelNotFound && !advanceCombo) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
         return result;
       }

@@ -36,7 +36,7 @@ export function checkFallbackError(status, errorText, backoffLevel = 0) {
       // through other accounts. Signal the caller to stop iterating; cooldownMs
       // still applies to this account so the picker won't keep selecting it.
       if (rule.shouldFallback === false) {
-        return { shouldFallback: false, cooldownMs: rule.cooldownMs, accountLock: rule.accountLock || false, permanent: rule.permanent || false };
+        return { shouldFallback: false, advanceCombo: rule.advanceCombo || false, cooldownMs: rule.cooldownMs, accountLock: rule.accountLock || false, permanent: rule.permanent || false };
       }
       return { shouldFallback: true, cooldownMs: rule.cooldownMs, accountLock: rule.accountLock || false, permanent: rule.permanent || false };
     }
@@ -48,7 +48,7 @@ export function checkFallbackError(status, errorText, backoffLevel = 0) {
         return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
       }
       if (rule.shouldFallback === false) {
-        return { shouldFallback: false, cooldownMs: rule.cooldownMs, accountLock: rule.accountLock || false, permanent: rule.permanent || false };
+        return { shouldFallback: false, advanceCombo: rule.advanceCombo || false, cooldownMs: rule.cooldownMs, accountLock: rule.accountLock || false, permanent: rule.permanent || false };
       }
       return { shouldFallback: true, cooldownMs: rule.cooldownMs, accountLock: rule.accountLock || false, permanent: rule.permanent || false };
     }
