@@ -144,6 +144,17 @@ export const ERROR_RULES = [
   // encadeia locks (~300/h medidos). Sem lock (cooldownMs: 0) e COM fallback
   // — o próximo modelo pode ler a imagem — igual à thinking signature acima.
   { text: "unable to process input image",    cooldownMs: 0 },
+  // 2026-09-19 — Free tier do OpenCode Zen. O 403 "FreeTierError: OpenCode's
+  // free tier can only be used from within OpenCode" é uma decisão do
+  // provedor sobre o CONTEÚDO do pedido (o prompt de sistema), não sobre a
+  // conta: medido, é idêntico e determinístico em qualquer credencial. Sem a
+  // regra abaixo ele casa com `{ status: 403 }` genérica, e um único pedido
+  // queima as 12 contas em ~3 s deixando cada uma com modelLock_* de 120 s —
+  // o que derruba tráfego LIMPO de outros modelos do mesmo provedor. Não faz
+  // fallback e não esfria a conta (mesmo padrão das regras de tamanho de
+  // entrada acima); o erro sobe honesto para o chamador.
+  { text: "free tier can only be used from within opencode", shouldFallback: false, cooldownMs: 0 },
+  { text: "freetiererror",                                   shouldFallback: false, cooldownMs: 0 },
   { text: "rate limit",                backoff: true },
   { text: "too many requests",         backoff: true },
   { text: "quota exceeded",            backoff: true },

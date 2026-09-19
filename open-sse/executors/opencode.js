@@ -34,18 +34,26 @@ export const OPENCODE_SESSION_HEADER = "x-opencode-session";
 const SESSION_FIELD = "_opencodeSession";
 const MAX_SESSION_LENGTH = 256;
 
-// The Console free tier validates the caller looks like a real client
-// (measured 2026-09-17, production outage: every variant with a forged
-// session id or a non-opencode User-Agent 403s with
-// "FreeTierError: OpenCode's free tier can only be used from within OpenCode",
-// while fresh opencode-format ids + official UA 200):
-//   1. session/request ids follow packages/opencode/src/id/id.ts:
-//      `<prefix>_<12 hex: timestamp_ms * 0x1000>_<14 base62 random>`.
-//      Fabricated ids (stale timestamp or wrong shape) are rejected.
-//   2. User-Agent must be `opencode/<version>` — bump alongside official
-//      releases; a stale version will eventually read as foreign again.
-// The x-opencode-client value itself is free-form (measured: any non-empty
-// value passes, so this gateway identifies honestly as `krouter`).
+// CORREÇÃO 2026-09-19 — o bloco anterior aqui afirmava, como medido, que o
+// free tier do Console valida os HEADERS (id de sessão no formato certo +
+// User-Agent `opencode/<versão>`). Isso está ERRADO e foi retratado: aquele
+// experimento de 09-17 variou headers e corpo ao mesmo tempo e creditou ao
+// header a diferença que era do corpo.
+//
+// Medido 2026-09-19 com um proxy interceptando o cliente oficial e replay
+// controlado (uma variável por vez, resto byte a byte idêntico):
+//   corpo real + headers do opencode ........... 200
+//   corpo real + headers do KROUTER ............ 200   <- headers não importam
+//   corpo mínimo + headers do opencode ......... 403
+//   prompt `developer` real + user "hi" ........ 200
+//   prompt `developer` genérico ................ 403
+// Ou seja: o discriminante é o CONTEÚDO DO PROMPT DE SISTEMA, não o header.
+// Nenhum ajuste de header, id, UA, proxy ou IP faz o free tier passar por
+// aqui — é um controle do provedor restringindo o tier ao cliente dele, e o
+// caminho legítimo é `opencode auth login` (100 req/dia) colado nas conexões
+// do dashboard. Ver OKF findings/opencode-zen-valida-prompt-de-sistema-2026-09-19.
+//
+// O que segue vale por fidelidade de formato, não por efeito no 403:
 const OPENCODE_USER_AGENT = "opencode/1.18.31";
 const OPENCODE_CLIENT_NAME = "krouter";
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -59,14 +67,28 @@ function base62FromDigest(digest, length) {
   return out;
 }
 
-// Mint an opencode-format id: fresh timestamp (the Console rejects stale or
-// malformed ones) + suffix derived deterministically from the seed so the
-// same conversation keeps affinity instead of looking like a new client
-// every turn.
-export function mintOpenCodeId(prefix, seed) {
-  // BigInt: Date.now() * 0x1000 overflows float->int32 bitwise ops (they wrap
-  // to a NEGATIVE number and toString(16) emits "-...").
-  const timeHex = ((BigInt(Date.now()) * 0x1000n) & 0xffffffffffffn).toString(16).padStart(12, "0");
+// 48 bits, como packages/opencode/src/id/id.ts. `Date.now() * 0x1000` passa de
+// 2^48, e o truncamento é do formato, NÃO um bug: um id real capturado do
+// cliente oficial (msg_0b9c56b7f001...) decodifica para 1971 exatamente assim.
+const OPENCODE_ID_MASK = 0xffffffffffffn;
+// Desempata ids emitidos no mesmo milissegundo, como o counter do upstream.
+let openCodeIdCounter = 0;
+
+// Mint an opencode-format id: `<prefix>_<12 hex><14 base62>`, onde os 12 hex
+// são `(Date.now() * 0x1000 + counter) & 2^48-1` — ascendente para mensagens,
+// COMPLEMENTADO (`~n`) para sessões, que o upstream emite em ordem decrescente
+// para que a listagem mais recente venha primeiro. O sufixo vem do seed para
+// que a mesma conversa mantenha afinidade em vez de parecer um cliente novo a
+// cada turno.
+//
+// Verificado 2026-09-19 contra uma captura do cliente oficial: com
+// ses_f463a94adffe... e msg_0b9c56b7f001... emitidos na mesma sessão,
+// `~msg & MASK` = f463a9480ffe reproduz o `ses` até o 7º dígito — a diferença
+// restante são os 45 ms entre a criação da sessão e a da mensagem.
+export function mintOpenCodeId(prefix, seed, { descending = false } = {}) {
+  const n = BigInt(Date.now()) * 0x1000n + BigInt(openCodeIdCounter++ & 0xfff);
+  const value = descending ? (~n & OPENCODE_ID_MASK) : (n & OPENCODE_ID_MASK);
+  const timeHex = value.toString(16).padStart(12, "0");
   const suffix = base62FromDigest(
     crypto.createHash("sha256").update(`opencode\0${seed}`).digest(),
     14
@@ -91,7 +113,8 @@ function nativeSession(headers) {
 
 function translatedSession(seed, clientTool) {
   void clientTool;
-  return mintOpenCodeId("ses", `session\0${seed}`);
+  // Sessão é DESCENDENTE no upstream (Identifier.descending("ses")).
+  return mintOpenCodeId("ses", `session\0${seed}`, { descending: true });
 }
 
 function translatedRequestId(seed) {
