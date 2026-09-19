@@ -35,17 +35,27 @@ function sanitizeGeminiFunctionName(name) {
   return sanitized.substring(0, 64);
 }
 
-// Forced function calling is ANY mode on Google's side, and Google rejects it
-// together with a JSON response mime type:
+// Google rejects ANY mode together with a JSON response mime type:
 //   "Forced function calling (ANY mode) with a response mime type:
 //    'application/json' is unsupported" (400 INVALID_ARGUMENT)
-// In that mode the model emits a function call rather than text, so the response
-// schema has nothing to constrain — dropping it keeps the call alive without
-// changing what comes back.
-function isForcedToolChoice(toolChoice) {
-  if (!toolChoice) return false;
-  if (toolChoice === "required" || toolChoice === "any") return true;
-  return typeof toolChoice === "object" && (toolChoice.type === "function" || toolChoice.type === "tool");
+//
+// The trigger is the mode in the NATIVE body, not `tool_choice` in the OpenAI
+// body. This translator never turns `tool_choice` into functionCallingConfig —
+// the only mode it ever emits is VALIDATED, on the Antigravity path — so keying
+// the guard on `tool_choice` dropped the JSON contract on every forced-tool turn
+// while the request upstream was byte-identical to `tool_choice: "auto"`.
+// Measured 2026-09-19 on gemini-3.5-flash-lite: same body, `required` came back
+// as a ```json fence with finish_reason "stop" (no function call at all),
+// `auto` came back as a clean tool call with the schema applied. The comment
+// this replaces claimed the model emits a function call instead of text in that
+// mode; it does not, because the mode never reaches Google.
+//
+// Order matters: this is evaluated against the native body as built so far, so
+// any path that emits ANY mode must set toolConfig before applying the response
+// format. No path emits ANY today, which is exactly why the guard was unreachable
+// in the form that mattered and misfiring in the form that did not.
+function emitsAnyFunctionCallingMode(result) {
+  return result?.toolConfig?.functionCallingConfig?.mode === "ANY";
 }
 
 // The Gemini native API has no `response_format`; it expresses the same contract
@@ -55,7 +65,7 @@ function isForcedToolChoice(toolChoice) {
 export function applyGeminiResponseFormat(result, body) {
   const rf = body?.response_format;
   if (rf?.type !== "json_object" && rf?.type !== "json_schema") return result;
-  if (isForcedToolChoice(body.tool_choice)) return result;
+  if (emitsAnyFunctionCallingMode(result)) return result;
 
   result.generationConfig.responseMimeType = "application/json";
 

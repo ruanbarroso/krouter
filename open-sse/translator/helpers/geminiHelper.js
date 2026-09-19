@@ -282,7 +282,16 @@ function flattenTypeArrays(obj) {
 
   if (obj.type && Array.isArray(obj.type)) {
     const nonNullTypes = obj.type.filter(t => t !== "null");
+    const wasNullable = nonNullTypes.length !== obj.type.length;
     obj.type = nonNullTypes.length > 0 ? nonNullTypes[0] : "string";
+
+    // Gemini's OpenAPI subset spells nullability as `nullable`, not as a type
+    // union, so dropping "null" without setting it silently changes the contract.
+    // With OpenAI strict mode putting every property in `required`, the model was
+    // told `error` is a mandatory STRING and answered the only way the schema
+    // allowed — the literal text "null". Reproduced 2026-09-19 in one call:
+    // {"ok": true, "error": "null"}.
+    if (wasNullable) obj.nullable = true;
   }
 
   for (const value of Object.values(obj)) {

@@ -12,7 +12,7 @@
  * contract differently, and one documented drop where forwarding it would 400.
  */
 import { describe, expect, it } from "vitest";
-import { openaiToGeminiRequest, openaiToGeminiCLIRequest } from "../../open-sse/translator/request/openai-to-gemini.js";
+import { openaiToGeminiRequest, openaiToGeminiCLIRequest, applyGeminiResponseFormat } from "../../open-sse/translator/request/openai-to-gemini.js";
 import { openaiToOpenAIResponsesRequest } from "../../open-sse/translator/request/openai-responses.js";
 
 const MESSAGES = [{ role: "user", content: "extract the total" }];
@@ -83,10 +83,14 @@ describe("Gemini: response_format -> generationConfig", () => {
   });
 
   it.each(["required", "any", { type: "function", function: { name: "search" } }])(
-    "drops the JSON mime type when tool_choice is forced (%o)",
+    "keeps the JSON contract when tool_choice is forced (%o)",
     (toolChoice) => {
-      // Google: "Forced function calling (ANY mode) with a response mime type:
-      // 'application/json' is unsupported" — 400 on the whole turn.
+      // This used to drop the mime type, guarding against Google's
+      // "Forced function calling (ANY mode) with a response mime type" 400.
+      // But the translator never turns tool_choice into functionCallingConfig,
+      // so the request upstream is byte-identical to tool_choice: "auto" and the
+      // 400 cannot happen. The drop only cost the contract: measured 2026-09-19,
+      // the forced turn came back as a ```json fence with finish_reason "stop".
       const out = openaiToGeminiRequest("gemini-3.7-flash", {
         messages: MESSAGES,
         response_format: jsonSchemaFormat(),
@@ -94,11 +98,51 @@ describe("Gemini: response_format -> generationConfig", () => {
         tools: [{ type: "function", function: { name: "search", parameters: { type: "object", properties: {} } } }]
       }, false);
 
-      expect(out.generationConfig.responseMimeType).toBeUndefined();
-      expect(out.generationConfig.responseSchema).toBeUndefined();
+      expect(out.generationConfig.responseMimeType).toBe("application/json");
+      expect(out.generationConfig.responseSchema).toBeDefined();
       expect(out.tools[0].functionDeclarations).toHaveLength(1);
+      // The guard's real trigger never fires here, because nothing sets it.
+      expect(out.toolConfig?.functionCallingConfig?.mode).not.toBe("ANY");
     }
   );
+
+  it("still drops the JSON mime type when the native body really is in ANY mode", () => {
+    // The guard now keys on what goes upstream. Built by hand because no current
+    // path emits ANY — if one ever does, this is the contract it must honour.
+    const result = { generationConfig: {}, toolConfig: { functionCallingConfig: { mode: "ANY" } } };
+    applyGeminiResponseFormat(result, { response_format: jsonSchemaFormat() });
+
+    expect(result.generationConfig.responseMimeType).toBeUndefined();
+    expect(result.generationConfig.responseSchema).toBeUndefined();
+  });
+
+  it("carries nullable union types through as nullable, not as a bare string", () => {
+    // type:["string","null"] used to collapse to type:"string". With strict mode
+    // putting the field in `required`, the model was told `error` is a mandatory
+    // string and wrote the literal text "null" — the zydon-ai Quick Order symptom.
+    const out = openaiToGeminiRequest("gemini-3.7-flash", {
+      messages: MESSAGES,
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "t",
+          strict: true,
+          schema: {
+            type: "object",
+            properties: { ok: { type: "boolean" }, error: { type: ["string", "null"] } },
+            required: ["ok", "error"]
+          }
+        }
+      }
+    }, false);
+
+    expect(out.generationConfig.responseSchema.properties.error).toMatchObject({
+      type: "string",
+      nullable: true
+    });
+    // A plain type is untouched.
+    expect(out.generationConfig.responseSchema.properties.ok.nullable).toBeUndefined();
+  });
 
   it("leaves generationConfig untouched when there is no response_format", () => {
     const out = openaiToGeminiRequest("gemini-3.7-flash", { messages: MESSAGES }, false);
