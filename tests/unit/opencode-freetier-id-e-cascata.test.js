@@ -24,6 +24,7 @@ import { describe, expect, it } from "vitest";
 import { mintOpenCodeId, openCodeSessionId } from "../../open-sse/executors/opencode.js";
 import { checkFallbackError } from "../../open-sse/services/accountFallback.js";
 import { handleComboChat } from "../../open-sse/services/combo.js";
+import { buildErrorBody } from "../../open-sse/utils/error.js";
 
 const MASK = 0xffffffffffffn;
 const hexOf = (id) => id.slice(id.indexOf("_") + 1, id.indexOf("_") + 13);
@@ -158,5 +159,40 @@ describe("FreeTierError avança o combo em vez de abortá-lo", () => {
     });
 
     expect(res.status).toBe(403);
+  });
+});
+
+/**
+ * 4. O envelope do 403 afirmava cota (2026-09-19).
+ *
+ *    `ERROR_TYPES[403].code` era `insufficient_quota`, carimbado em TODO 403 —
+ *    inclusive no do free tier, cujo `message` diz exatamente o contrário. O
+ *    gateway acima (barroso-keys) classifica pelo corpo, viu a palavra `quota`
+ *    e gravou um `usageLimit` declarado que nenhum provedor declarou; dali saía
+ *    `429 usage_limit_reached` a cada pedido, com lock de 15 min.
+ */
+describe("envelope do 403 não afirma cota", () => {
+  it("403 é permissão negada, não quota", () => {
+    const body = buildErrorBody(403, "OpenCode's free tier can only be used from within OpenCode");
+    expect(body.error.type).toBe("permission_error");
+    expect(body.error.code).toBe("permission_denied");
+    // A serialização inteira precisa estar limpa: o matcher do gateway acima
+    // varre o corpo, não só o campo `code`.
+    expect(JSON.stringify(body)).not.toMatch(/quota/i);
+  });
+
+  it("um 403 sem mensagem do provedor também não inventa cota", () => {
+    expect(JSON.stringify(buildErrorBody(403, null))).not.toMatch(/quota/i);
+  });
+
+  it("a mensagem do provedor continua sendo preservada", () => {
+    const body = buildErrorBody(403, "You exceeded your current quota");
+    expect(body.error.message).toBe("You exceeded your current quota");
+  });
+
+  it("429 continua sendo rate limit", () => {
+    const body = buildErrorBody(429, null);
+    expect(body.error.type).toBe("rate_limit_error");
+    expect(body.error.code).toBe("rate_limit_exceeded");
   });
 });

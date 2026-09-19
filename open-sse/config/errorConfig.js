@@ -3,7 +3,16 @@ export const ERROR_TYPES = {
   400: { type: "invalid_request_error", code: "bad_request" },
   401: { type: "authentication_error", code: "invalid_api_key" },
   402: { type: "billing_error", code: "payment_required" },
-  403: { type: "permission_error", code: "insufficient_quota" },
+  // 2026-09-19 — 403 é RECUSA DE PERMISSÃO, não cota. O `insufficient_quota`
+  // que estava aqui era carimbado em TODO 403, inclusive nos que dizem o
+  // contrário no `message` (free tier do Zen, IP bloqueado, chave revogada).
+  // Gateways acima leem o `code` — o barroso-keys lia este e inventava um
+  // limite de uso que nenhum provedor declarou, devolvendo `429
+  // usage_limit_reached` ao usuário por um 403 que não tinha nada a ver com
+  // cota. Um 403 de cota de verdade continua chegando com a frase do provedor
+  // no `message`, que é preservada; o que muda é parar de afirmar cota quando
+  // ninguém afirmou.
+  403: { type: "permission_error", code: "permission_denied" },
   404: { type: "invalid_request_error", code: "model_not_found" },
   406: { type: "invalid_request_error", code: "model_not_supported" },
   429: { type: "rate_limit_error", code: "rate_limit_exceeded" },
@@ -18,7 +27,7 @@ export const DEFAULT_ERROR_MESSAGES = {
   400: "Bad request",
   401: "Invalid API key provided",
   402: "Payment required",
-  403: "You exceeded your current quota",
+  403: "Forbidden by the upstream provider", // ver ERROR_TYPES[403]: 403 não é cota
   404: "Model not found",
   406: "Model not supported",
   429: "Rate limit exceeded",
