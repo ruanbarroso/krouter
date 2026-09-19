@@ -451,8 +451,16 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log?.debug?.("SESSION", `sid=${userSessionId.slice(0, 12)} conn=${connectionId?.slice(0, 8) || "noauth"}`);
   }
 
+  // Thread the downstream client's own headers to the executor (immutable
+  // copy — never mutate the shared credentials object). Providers whose
+  // upstream validates caller identity (e.g. opencode/zen) forward the
+  // client's own identity headers verbatim instead of stamping the gateway's.
+  const execCredentials = clientRawRequest?.headers
+    ? { ...credentials, rawHeaders: clientRawRequest.headers }
+    : credentials;
+
   try {
-    const result = await executor.execute({ model, body: translatedBody, stream, credentials, clientTool, signal: streamController.signal, log, proxyOptions, clientBetaFlags });
+    const result = await executor.execute({ model, body: translatedBody, stream, credentials: execCredentials, clientTool, signal: streamController.signal, log, proxyOptions, clientBetaFlags });
     providerResponse = result.response;
     providerUrl = result.url;
     providerHeaders = result.headers;
@@ -505,7 +513,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         log?.info?.("TOKEN", `${provider.toUpperCase()} | refreshed`);
         // Immutable update — never mutate the caller's credentials object.
         // Concurrent requests sharing the same reference must not see each other's tokens.
-        const updatedCredentials = { ...credentials, ...newCredentials };
+        // Re-attach the downstream client's headers so the retry dispatches identically.
+        const updatedCredentials = { ...execCredentials, ...newCredentials };
         if (onCredentialsRefreshed) {
           try { await onCredentialsRefreshed(newCredentials); } catch (e) { log?.warn?.("TOKEN", `onCredentialsRefreshed failed: ${e.message}`); }
         }

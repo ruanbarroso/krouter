@@ -111,6 +111,41 @@ function nativeSession(headers) {
   return null;
 }
 
+// Read one incoming client header case-insensitively, trimmed and capped so a
+// caller-supplied value can never become a header-injection vector. Returns
+// null when the client did not send it — the caller then falls back to the
+// minted/default value.
+export function nativeHeader(headers, name) {
+  if (!headers || typeof headers !== "object") return null;
+  const want = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === want && typeof value === "string" && value.trim()) {
+      return value.trim().slice(0, 256);
+    }
+  }
+  return null;
+}
+
+// The Zen Responses endpoint serves the caller's system prompt as a
+// `developer` input message (captured 2026-09-19 from the official client:
+// input roles `developer,user,user`, no `instructions` field). The generic
+// OpenAI→Responses translator lands a `system` message on `instructions`, so
+// map it back to the native shape here: prepend as developer input, preserving
+// message order (system first). Never invents prompt text — when the client
+// sent no system/developer content the body passes through untouched.
+export function moveInstructionsToDeveloper(transformedBody) {
+  const instructions = transformedBody?.instructions;
+  if (typeof instructions !== "string" || !instructions.trim()) return transformedBody;
+  return {
+    ...transformedBody,
+    instructions: undefined,
+    input: [
+      { type: "message", role: "developer", content: [{ type: "input_text", text: instructions }] },
+      ...(Array.isArray(transformedBody.input) ? transformedBody.input : []),
+    ],
+  };
+}
+
 function translatedSession(seed, clientTool) {
   void clientTool;
   // Sessão é DESCENDENTE no upstream (Identifier.descending("ses")).
@@ -261,14 +296,21 @@ export class OpenCodeExecutor extends BaseExecutor {
   buildHeaders(credentials, stream = true) {
     const key = credentials?.apiKey || credentials?.accessToken || "public";
     const seed = resolveOpenCodeSeed(credentials || {}, null);
+    // Transparent proxy: when the downstream client is the official client it
+    // already sends its own identity headers — forward them verbatim instead
+    // of stamping the gateway's own. Falls back to minted/defaults for
+    // non-opencode clients. (credentials.rawHeaders is threaded from the
+    // incoming request by chatCore; absent in tests and non-chat paths.)
+    const incoming = credentials?.rawHeaders || null;
     const headers = {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${key}`,
-      "x-opencode-client": OPENCODE_CLIENT_NAME,
+      "x-opencode-client": nativeHeader(incoming, "x-opencode-client") || OPENCODE_CLIENT_NAME,
       "x-request-source": "local",
-      "x-opencode-request": translatedRequestId(`${seed}\0${Date.now()}`),
-      "x-opencode-project": "global",
-      "user-agent": OPENCODE_USER_AGENT,
+      "x-opencode-request": nativeHeader(incoming, "x-opencode-request")
+        || translatedRequestId(`${seed}\0${Date.now()}`),
+      "x-opencode-project": nativeHeader(incoming, "x-opencode-project") || "global",
+      "user-agent": nativeHeader(incoming, "user-agent") || OPENCODE_USER_AGENT,
     };
     if (stream) headers["Accept"] = "text/event-stream";
     headers[OPENCODE_SESSION_HEADER] = credentials?.[SESSION_FIELD]
@@ -280,7 +322,9 @@ export class OpenCodeExecutor extends BaseExecutor {
     const url = this.buildUrl(model);
     const headers = this.buildHeaders(credentials, true);
     const chatBody = this.transformRequest(model, body);
-    const transformedBody = openaiToOpenAIResponsesRequest(model, chatBody, true, credentials);
+    const transformedBody = moveInstructionsToDeveloper(
+      openaiToOpenAIResponsesRequest(model, chatBody, true, credentials)
+    );
 
     const response = await proxyAwareFetch(url, {
       method: "POST",

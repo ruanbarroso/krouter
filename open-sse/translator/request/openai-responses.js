@@ -236,9 +236,12 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
       continue; // Skip system messages in input
     }
 
-    // Convert user/assistant messages to input items
-    if (msg.role === "user" || msg.role === "assistant") {
-      const contentType = msg.role === "user" ? "input_text" : "output_text";
+    // Convert user/assistant/developer messages to input items.
+    // "developer" must be preserved verbatim: the Zen Responses endpoint
+    // serves the caller's system prompt as a developer input message, and
+    // dropping it here silently discards the client's prompt before dispatch.
+    if (msg.role === "user" || msg.role === "assistant" || msg.role === "developer") {
+      const contentType = msg.role === "assistant" ? "output_text" : "input_text";
       const content = typeof msg.content === "string"
         ? [{ type: contentType, text: msg.content }]
         : Array.isArray(msg.content)
