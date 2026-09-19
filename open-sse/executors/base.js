@@ -120,6 +120,23 @@ export class BaseExecutor {
     return null;
   }
 
+  // True only when a subclass actually implements a refresh flow. The base
+  // implementation above is a constant `null`, so running the retry loop
+  // against it can never produce a token — it just sleeps 1s + 2s and logs a
+  // causeless "All 3 retry attempts failed". 13 executors inherit it (static
+  // API keys: opencode, azure, iflow, ollama-local, …), and every 401/403 they
+  // return used to pay that cost. Measured 2026-09-19 on llm.barroso: 72
+  // refresh cycles for opencode, 0 successes, ~3s wasted each before the combo
+  // moved to the next rung. Prototype identity is the check because it needs
+  // no per-subclass bookkeeping: override the method and you opt in.
+  //
+  // Caveat: an OWN property shadowing the method (a monkey-patch, or vi.spyOn
+  // in a test) reads as an override and flips this to true. Wrap at the class,
+  // not the instance.
+  canRefreshCredentials() {
+    return this.refreshCredentials !== BaseExecutor.prototype.refreshCredentials;
+  }
+
   needsRefresh(credentials) {
     return shouldRefreshCredentials(this.provider, credentials);
   }

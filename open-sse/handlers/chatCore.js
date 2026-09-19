@@ -481,8 +481,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
   }
 
-  // Handle 401/403 - try token refresh (skip for noAuth providers)
-  if (!executor.noAuth && (providerResponse.status === HTTP_STATUS.UNAUTHORIZED || providerResponse.status === HTTP_STATUS.FORBIDDEN)) {
+  // Handle 401/403 - try token refresh (skip for noAuth providers, and for
+  // providers with no refresh flow at all — see canRefreshCredentials). A 403
+  // from a static-key provider is a policy decision, not an expired token:
+  // OpenCode's free tier answers "can only be used from within OpenCode", and
+  // no amount of refreshing changes that.
+  if (!executor.noAuth && executor.canRefreshCredentials()
+      && (providerResponse.status === HTTP_STATUS.UNAUTHORIZED || providerResponse.status === HTTP_STATUS.FORBIDDEN)) {
     try {
       // 0.5.124 (upstream aa0448f7, adapted) — rotating-refresh-token providers
       // (xAI/grok-cli) issue a NEW refresh_token on every refresh, so

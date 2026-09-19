@@ -131,6 +131,7 @@ export async function handleImageGenerationCore({
   if (
     !executor?.noAuth &&
     !adapter.noAuth &&
+    executor?.canRefreshCredentials?.() &&
     (providerResponse.status === HTTP_STATUS.UNAUTHORIZED ||
       providerResponse.status === HTTP_STATUS.FORBIDDEN)
   ) {

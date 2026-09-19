@@ -80,6 +80,7 @@ export async function handleEmbeddingsCore({
   const executor = getExecutor(provider);
   if (
     !executor?.noAuth &&
+    executor?.canRefreshCredentials?.() &&
     (providerResponse.status === HTTP_STATUS.UNAUTHORIZED ||
       providerResponse.status === HTTP_STATUS.FORBIDDEN)
   ) {

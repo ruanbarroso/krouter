@@ -963,6 +963,12 @@ export async function refreshWithRetry(refreshFn, maxRetries = 3, log = null) {
     try {
       const result = await refreshFn();
       if (result) return result;
+      // A falsy return is a failure too, and it used to be a SILENT one: only
+      // the throw path logged a reason, so a refresh that failed cleanly was
+      // indistinguishable in the journal from one that never ran. Measured
+      // 2026-09-19 on llm.barroso: 72 "All 3 retry attempts failed" against 0
+      // "Attempt n/3 failed" lines — every cause invisible.
+      log?.warn?.("TOKEN_REFRESH", `Attempt ${attempt + 1}/${maxRetries} returned no credentials`);
     } catch (error) {
       log?.warn?.("TOKEN_REFRESH", `Attempt ${attempt + 1}/${maxRetries} failed: ${error.message}`);
     }
